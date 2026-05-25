@@ -22,17 +22,38 @@ When the command exits, RoboRanch cleans the emulator and releases the lease.
 
 ## Install
 
-Install from source:
+Install with Homebrew:
 
 ```sh
-go install github.com/TracqiTechnology/roboranch/cmd/roboranch@latest
+brew install KalebKE/tap/roboranch
+```
+
+Or tap first:
+
+```sh
+brew tap KalebKE/tap
+brew install roboranch
+```
+
+Install a release binary directly from [GitHub Releases](https://github.com/KalebKE/RoboRanch/releases):
+
+```sh
+curl -L -o roboranch.tar.gz https://github.com/KalebKE/RoboRanch/releases/download/v0.1.0/roboranch_v0.1.0_darwin_arm64.tar.gz
+tar -xzf roboranch.tar.gz
+sudo mv roboranch /usr/local/bin/
+```
+
+Or install from source:
+
+```sh
+go install github.com/KalebKE/RoboRanch/cmd/roboranch@latest
 ```
 
 For local development on RoboRanch itself:
 
 ```sh
-git clone https://github.com/TracqiTechnology/roboranch.git
-cd roboranch
+git clone https://github.com/KalebKE/RoboRanch.git
+cd RoboRanch
 go test ./...
 go build -o bin/roboranch ./cmd/roboranch
 ```

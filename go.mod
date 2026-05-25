@@ -1,4 +1,3 @@
-module github.com/TracqiTechnology/roboranch
+module github.com/KalebKE/RoboRanch
 
 go 1.22
-

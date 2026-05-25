@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/TracqiTechnology/roboranch/internal/roboranch"
+	"github.com/KalebKE/RoboRanch/internal/roboranch"
 )
 
 func main() {
