@@ -1,5 +1,9 @@
 # RoboRanch
 
+<p align="center">
+  <img src="assets/roboranch-gate.svg" alt="RoboRanch gate mark" width="220">
+</p>
+
 RoboRanch is a lightweight Android emulator and device lease broker for local developers, agentic coding sessions, and CI runners.
 
 It is intentionally smaller than Appium Grid, Selenium Grid, or a device cloud. Those tools route test protocols. RoboRanch manages the host-level pool underneath: which emulator or device is free, how long a job may hold it, whether it is healthy, and how to clean it before the next job.

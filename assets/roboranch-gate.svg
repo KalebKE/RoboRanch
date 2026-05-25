@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 24 60 56">
+  <title>RoboRanch — The Gate mark</title>
+  <rect x="26" y="30" width="7" height="48" rx="2" fill="#8A6A42"/>
+  <rect x="67" y="30" width="7" height="48" rx="2" fill="#8A6A42"/>
+  <rect x="22" y="26" width="56" height="9" rx="2.5" fill="#A07C4C"/>
+  <rect x="40" y="40" width="20" height="13" rx="2" fill="#11100E" stroke="#3DDC84" stroke-width="2"/>
+  <path d="M44 47 h12 M50 44 v6" stroke="#3DDC84" stroke-width="2" stroke-linecap="round"/>
+  <g stroke="#FFD23A" stroke-width="1.6">
+    <line x1="40" y1="40" x2="40" y2="35"/>
+    <line x1="60" y1="40" x2="60" y2="35"/>
+  </g>
+  <path d="M35 78 h30" stroke="#3A352E" stroke-width="3" stroke-linecap="round"/>
+</svg>
