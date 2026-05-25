@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.roboranch.pool-{{N}}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{ANDROID_SDK}}/emulator/emulator</string>
+        <string>-port</string>
+        <string>{{PORT}}</string>
+        <string>-avd</string>
+        <string>{{AVD_NAME}}</string>
+        <string>-no-window</string>
+        <string>-gpu</string>
+        <string>host</string>
+        <string>-noaudio</string>
+        <string>-no-boot-anim</string>
+        <string>-camera-back</string>
+        <string>none</string>
+        <string>-snapshot</string>
+        <string>ci-clean</string>
+        <string>-no-snapshot-save</string>
+        <string>-read-only</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>{{STATE_DIR}}/logs/{{AVD_NAME}}.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{STATE_DIR}}/logs/{{AVD_NAME}}.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ANDROID_HOME</key>
+        <string>{{ANDROID_SDK}}</string>
+        <key>ANDROID_SDK_ROOT</key>
+        <string>{{ANDROID_SDK}}</string>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>8192</integer>
+    </dict>
+</dict>
+</plist>
+

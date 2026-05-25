@@ -1,0 +1,18 @@
+[Unit]
+Description=RoboRanch Android emulator pool {{N}}
+After=default.target
+
+[Service]
+Type=simple
+Environment=ANDROID_HOME={{ANDROID_SDK}}
+Environment=ANDROID_SDK_ROOT={{ANDROID_SDK}}
+ExecStart={{ANDROID_SDK}}/emulator/emulator -port {{PORT}} -avd {{AVD_NAME}} -no-window -gpu host -noaudio -no-boot-anim -camera-back none -snapshot ci-clean -no-snapshot-save -read-only
+Restart=always
+RestartSec=30
+StandardOutput=append:{{STATE_DIR}}/logs/{{AVD_NAME}}.log
+StandardError=append:{{STATE_DIR}}/logs/{{AVD_NAME}}.log
+LimitNOFILE=8192
+
+[Install]
+WantedBy=default.target
+

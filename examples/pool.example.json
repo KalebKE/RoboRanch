@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "stateDir": "~/.local/share/roboranch",
+  "androidSdk": "",
+  "defaultTTL": "30m",
+  "repairTimeout": "2m",
+  "devices": [
+    {
+      "id": "ranch-hand-1",
+      "type": "emulator",
+      "serial": "emulator-5554",
+      "launchdLabel": "com.roboranch.pool-1",
+      "systemdUnit": "roboranch-pool-1.service",
+      "labels": ["emulator", "api36", "x86_64", "pool-1"],
+      "notes": "AVD restored from a ci-clean snapshot"
+    },
+    {
+      "id": "ranch-hand-2",
+      "type": "emulator",
+      "serial": "emulator-5556",
+      "launchdLabel": "com.roboranch.pool-2",
+      "systemdUnit": "roboranch-pool-2.service",
+      "labels": ["emulator", "api36", "x86_64", "pool-2"],
+      "notes": "AVD restored from a ci-clean snapshot"
+    },
+    {
+      "id": "physical-1",
+      "type": "device",
+      "serial": "REPLACE_WITH_USB_SERIAL",
+      "labels": ["device", "physical"],
+      "cleanup": {"enabled": false},
+      "notes": "Physical devices are not cleaned unless cleanup.enabled is true"
+    }
+  ]
+}
+
