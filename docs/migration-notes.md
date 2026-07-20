@@ -20,3 +20,14 @@ The migrated behavior changes:
 - Linux systemd templates are included beside macOS launchd templates
 - `pm trim-caches` remains intentionally omitted
 
+## iOS support
+
+Config version 1 remains valid. Existing devices with no `platform` field default to `android`, and checkout defaults to `--platform android`, so existing scripts do not begin leasing iOS targets.
+
+iOS adds:
+
+- fixed simulator pools addressed by UDID through `xcrun simctl`
+- strict erase-and-warm-boot cleanup for simulators
+- non-mutating physical iPhone leasing through `xcrun devicectl`
+- `--platform ios` and the `simulator` target type
+- `ROBORANCH_IOS_UDID` and `ROBORANCH_XCODE_DESTINATION` child-process variables

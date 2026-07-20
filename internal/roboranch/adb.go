@@ -34,21 +34,22 @@ func (a ADB) bootCompleted(ctx context.Context, device DeviceConfig) bool {
 	return err == nil && strings.TrimSpace(strings.ReplaceAll(out, "\r", "")) == "1"
 }
 
-func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer) {
+func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer) error {
 	if !device.cleanupEnabled() {
-		return
+		return nil
 	}
 	fmt.Fprintf(stderr, "roboranch: cleaning up %s (%s)\n", device.ID, device.Serial)
 	out, err := a.run(ctx, device.Serial, "shell", "pm", "list", "packages", "-3")
-	if err == nil {
-		for _, line := range strings.Split(out, "\n") {
-			pkg := strings.TrimSpace(strings.TrimPrefix(line, "package:"))
-			if pkg == "" {
-				continue
-			}
-			_, _ = a.run(ctx, device.Serial, "shell", "am", "force-stop", pkg)
-			_, _ = a.run(ctx, device.Serial, "uninstall", pkg)
+	if err != nil {
+		return fmt.Errorf("list third-party packages on %s: %w", device.ID, err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		pkg := strings.TrimSpace(strings.TrimPrefix(line, "package:"))
+		if pkg == "" {
+			continue
 		}
+		_, _ = a.run(ctx, device.Serial, "shell", "am", "force-stop", pkg)
+		_, _ = a.run(ctx, device.Serial, "uninstall", pkg)
 	}
 	_, _ = a.run(ctx, device.Serial, "shell", "am", "kill-all")
 	_, _ = a.run(ctx, device.Serial, "shell", "sync")
@@ -57,4 +58,5 @@ func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer)
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "transition_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "animator_duration_scale", "0.0")
 	fmt.Fprintf(stderr, "roboranch: cleanup done for %s\n", device.ID)
+	return nil
 }

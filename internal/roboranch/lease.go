@@ -22,6 +22,11 @@ type LeaseStore struct {
 	hostname string
 }
 
+type staleLease struct {
+	ID     string
+	Reason string
+}
+
 func newLeaseStore(stateDir string) (*LeaseStore, error) {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
@@ -53,6 +58,10 @@ func (s *LeaseStore) leasePath(id string) string {
 	return filepath.Join(s.locksDir, id+".lease.json")
 }
 
+func (s *LeaseStore) cleanupPath(id string) string {
+	return filepath.Join(s.locksDir, id+".cleanup")
+}
+
 func (s *LeaseStore) usedPath(id string) string {
 	return filepath.Join(s.usedDir, id+".used")
 }
@@ -62,21 +71,13 @@ func (s *LeaseStore) acquire(device DeviceConfig, holderPID int, ttl time.Durati
 	if ok, err := s.createLock(lock, holderPID); err != nil {
 		return nil, false, err
 	} else if !ok {
-		if stale, _ := s.stale(device.ID, time.Now()); stale {
-			_ = s.forceRelease(device.ID)
-			if ok, err := s.createLock(lock, holderPID); err != nil {
-				return nil, false, err
-			} else if !ok {
-				return nil, false, nil
-			}
-		} else {
-			return nil, false, nil
-		}
+		return nil, false, nil
 	}
 	now := time.Now().UTC()
 	lease := &Lease{
 		LeaseID:    newLeaseID(),
 		ID:         device.ID,
+		Platform:   device.Platform,
 		Serial:     device.Serial,
 		Type:       device.Type,
 		HolderPID:  holderPID,
@@ -103,6 +104,30 @@ func (s *LeaseStore) createLock(path string, holderPID int) (bool, error) {
 	defer file.Close()
 	_, err = fmt.Fprintf(file, "%d\n", holderPID)
 	return err == nil, err
+}
+
+func (s *LeaseStore) claimCleanup(id string, holderPID int) (bool, error) {
+	path := s.cleanupPath(id)
+	ok, err := s.createLock(path, holderPID)
+	if err != nil || ok {
+		return ok, err
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return false, nil
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if parseErr != nil || processAlive(pid) {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return s.createLock(path, holderPID)
+}
+
+func (s *LeaseStore) clearCleanup(id string) {
+	_ = os.Remove(s.cleanupPath(id))
 }
 
 func (s *LeaseStore) stale(id string, now time.Time) (bool, string) {
@@ -132,26 +157,37 @@ func (s *LeaseStore) readLease(id string) (*Lease, error) {
 }
 
 func (s *LeaseStore) release(id string, expectedLease string) error {
-	if expectedLease != "" {
-		lease, err := s.readLease(id)
-		if err != nil {
-			return err
-		}
-		if lease.LeaseID != expectedLease {
-			return fmt.Errorf("lease mismatch for %s: got %s expected %s", id, lease.LeaseID, expectedLease)
-		}
+	if err := s.validateRelease(id, expectedLease); err != nil {
+		return err
 	}
 	return s.forceRelease(id)
 }
 
-func (s *LeaseStore) forceRelease(id string) error {
-	lockErr := os.Remove(s.lockPath(id))
-	leaseErr := os.Remove(s.leasePath(id))
-	if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
-		return lockErr
+func (s *LeaseStore) validateRelease(id string, expectedLease string) error {
+	if !s.locked(id) {
+		return fmt.Errorf("%s is not leased", id)
 	}
+	lease, err := s.readLease(id)
+	if err != nil {
+		if expectedLease == "" {
+			return nil
+		}
+		return err
+	}
+	if expectedLease != "" && lease.LeaseID != expectedLease {
+		return fmt.Errorf("lease mismatch for %s: got %s expected %s", id, lease.LeaseID, expectedLease)
+	}
+	return nil
+}
+
+func (s *LeaseStore) forceRelease(id string) error {
+	leaseErr := os.Remove(s.leasePath(id))
 	if leaseErr != nil && !errors.Is(leaseErr, os.ErrNotExist) {
 		return leaseErr
+	}
+	lockErr := os.Remove(s.lockPath(id))
+	if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
+		return lockErr
 	}
 	return nil
 }
@@ -192,27 +228,22 @@ func (s *LeaseStore) orderByLastUsed(devices []DeviceConfig) {
 	})
 }
 
-func (s *LeaseStore) gc(verbose func(string, ...any)) int {
+func (s *LeaseStore) staleLeases(now time.Time) []staleLease {
 	entries, err := os.ReadDir(s.locksDir)
 	if err != nil {
-		return 0
+		return nil
 	}
-	now := time.Now()
-	reaped := 0
+	var staleEntries []staleLease
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lock") {
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), ".lock")
 		if stale, reason := s.stale(id, now); stale {
-			_ = s.forceRelease(id)
-			reaped++
-			if verbose != nil {
-				verbose("reaped %s (%s)", id, reason)
-			}
+			staleEntries = append(staleEntries, staleLease{ID: id, Reason: reason})
 		}
 	}
-	return reaped
+	return staleEntries
 }
 
 func writeJSONAtomic(path string, value any, perm os.FileMode) error {

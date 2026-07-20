@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -23,14 +24,14 @@ type App struct {
 }
 
 type runtimeState struct {
-	config Config
-	path   string
-	store  *LeaseStore
-	adb    ADB
-	host   HostManager
+	config   Config
+	path     string
+	store    *LeaseStore
+	backends backendRegistry
 }
 
 type checkoutOptions struct {
+	platform   Platform
 	deviceType DeviceType
 	serial     string
 	labels     []string
@@ -133,18 +134,19 @@ func (a *App) usage() {
 
 Commands:
   init [--force]                         Write an example config
-  doctor                                 Check config, state, and adb
+  doctor                                 Check config, state, and platform tools
   list [--json]                          List configured devices
   status --id ID [--json]                Show one device
   checkout [selectors] [--json]          Lease a device
   release --id ID [--lease LEASE]        Cleanup and release a device
   with-lease [selectors] -- CMD [ARGS...] Run a command with a leased device
-  repair --id ID|--all                   Restart unhealthy emulators
+  repair --id ID|--all                   Restart unhealthy virtual devices
   gc [--verbose]                         Reap stale or expired leases
 
 Selectors:
-  --type emulator|device|any
-  --serial SERIAL
+  --platform android|ios|any             Defaults to android
+  --type emulator|simulator|device|any
+  --serial SERIAL_OR_UDID
   --label LABEL                          May be repeated
   --ttl DURATION                         30m, 1800, 45s
   --wait DURATION                        Wait for a free device before failing
@@ -162,11 +164,10 @@ func (a *App) load() (*runtimeState, error) {
 		return nil, err
 	}
 	return &runtimeState{
-		config: cfg,
-		path:   path,
-		store:  store,
-		adb:    newADB(cfg.adbPath(), a.runner),
-		host:   newHostManager(a.runner),
+		config:   cfg,
+		path:     path,
+		store:    store,
+		backends: newBackendRegistry(cfg, a.runner),
 	}, nil
 }
 
@@ -207,19 +208,48 @@ func (a *App) cmdDoctor(args []string) error {
 	fmt.Fprintf(a.stdout, "config: %s\n", path)
 	fmt.Fprintf(a.stdout, "stateDir: %s\n", cfg.StateDir)
 	fmt.Fprintf(a.stdout, "devices: %d\n", len(cfg.Devices))
-	adbPath := cfg.adbPath()
-	if _, err := os.Stat(adbPath); err != nil {
-		if _, lookErr := exec.LookPath(adbPath); lookErr != nil {
-			fmt.Fprintf(a.stdout, "adb: missing (%s)\n", adbPath)
-			return commandError{code: exitUnavailable, err: fmt.Errorf("adb not found")}
+	failed := false
+	if cfg.hasPlatform(PlatformAndroid) {
+		adbPath := cfg.adbPath()
+		if _, err := os.Stat(adbPath); err != nil {
+			if _, lookErr := exec.LookPath(adbPath); lookErr != nil {
+				fmt.Fprintf(a.stdout, "adb: missing (%s)\n", adbPath)
+				failed = true
+			}
+		}
+		if !failed {
+			if out, err := a.runner.Run(context.Background(), adbPath, "version"); err == nil {
+				firstLine := strings.Split(strings.TrimSpace(out), "\n")[0]
+				fmt.Fprintf(a.stdout, "adb: %s\n", firstLine)
+			} else {
+				fmt.Fprintf(a.stdout, "adb: found at %s, but version check failed: %s\n", adbPath, err)
+				failed = true
+			}
 		}
 	}
-	if out, err := a.runner.Run(context.Background(), adbPath, "version"); err == nil {
-		firstLine := strings.Split(strings.TrimSpace(out), "\n")[0]
-		fmt.Fprintf(a.stdout, "adb: %s\n", firstLine)
-	} else {
-		fmt.Fprintf(a.stdout, "adb: found at %s, but version check failed: %s\n", adbPath, err)
-		return commandError{code: exitUnavailable, err: fmt.Errorf("adb version check failed")}
+	if cfg.hasPlatform(PlatformIOS) {
+		if runtime.GOOS != "darwin" {
+			fmt.Fprintln(a.stdout, "ios: unavailable (iOS targets require macOS)")
+			failed = true
+		} else {
+			if out, err := a.runner.Run(context.Background(), "xcrun", "--find", "simctl"); err == nil {
+				fmt.Fprintf(a.stdout, "simctl: %s\n", strings.TrimSpace(out))
+			} else {
+				fmt.Fprintf(a.stdout, "simctl: missing (%s)\n", err)
+				failed = true
+			}
+			if cfg.hasDevice(PlatformIOS, DeviceTypePhysical) {
+				if out, err := a.runner.Run(context.Background(), "xcrun", "--find", "devicectl"); err == nil {
+					fmt.Fprintf(a.stdout, "devicectl: %s\n", strings.TrimSpace(out))
+				} else {
+					fmt.Fprintf(a.stdout, "devicectl: missing (%s)\n", err)
+					failed = true
+				}
+			}
+		}
+	}
+	if failed {
+		return commandError{code: exitUnavailable, err: fmt.Errorf("doctor failed")}
 	}
 	fmt.Fprintln(a.stdout, "doctor: ok")
 	return nil
@@ -239,14 +269,14 @@ func (a *App) cmdList(args []string) error {
 	if *jsonMode {
 		return json.NewEncoder(a.stdout).Encode(map[string]any{"devices": statuses})
 	}
-	fmt.Fprintf(a.stdout, "%-16s %-9s %-22s %-8s %-8s %s\n", "ID", "TYPE", "SERIAL", "LOCKED", "HEALTHY", "HOLDER")
+	fmt.Fprintf(a.stdout, "%-16s %-8s %-9s %-36s %-8s %-8s %-24s %s\n", "ID", "PLATFORM", "TYPE", "SERIAL/UDID", "LOCKED", "HEALTHY", "HOLDER", "REASON")
 	for _, status := range statuses {
 		holder := ""
 		if status.Lease != nil {
 			holder = fmt.Sprintf("%s:pid=%d", status.Lease.Hostname, status.Lease.HolderPID)
 		}
-		fmt.Fprintf(a.stdout, "%-16s %-9s %-22s %-8s %-8s %s\n",
-			status.ID, status.Type, status.Serial, yesNo(status.Locked), yesNo(status.Healthy), holder)
+		fmt.Fprintf(a.stdout, "%-16s %-8s %-9s %-36s %-8s %-8s %-24s %s\n",
+			status.ID, status.Platform, status.Type, status.Serial, yesNo(status.Locked), yesNo(status.Healthy), holder, status.HealthReason)
 	}
 	return nil
 }
@@ -274,6 +304,7 @@ func (a *App) cmdStatus(args []string) error {
 		return json.NewEncoder(a.stdout).Encode(status)
 	}
 	fmt.Fprintf(a.stdout, "id=%s\n", status.ID)
+	fmt.Fprintf(a.stdout, "platform=%s\n", status.Platform)
 	fmt.Fprintf(a.stdout, "type=%s\n", status.Type)
 	fmt.Fprintf(a.stdout, "serial=%s\n", status.Serial)
 	fmt.Fprintf(a.stdout, "locked=%s\n", yesNo(status.Locked))
@@ -288,6 +319,9 @@ func (a *App) cmdStatus(args []string) error {
 		fmt.Fprintf(a.stdout, "holder_alive=%s\n", yesNo(*status.HolderAlive))
 	}
 	fmt.Fprintf(a.stdout, "healthy=%s\n", yesNo(status.Healthy))
+	if status.HealthReason != "" {
+		fmt.Fprintf(a.stdout, "health_reason=%s\n", status.HealthReason)
+	}
 	return nil
 }
 
@@ -329,9 +363,8 @@ func (a *App) cmdRelease(args []string) error {
 	if !ok {
 		return commandError{code: exitUsage, err: fmt.Errorf("unknown device id %q", *id)}
 	}
-	rt.adb.cleanup(context.Background(), device, a.stderr)
-	if err := rt.store.release(*id, *lease); err != nil {
-		return commandError{code: exitUsage, err: err}
+	if err := a.releaseDevice(context.Background(), rt, device, *lease); err != nil {
+		return err
 	}
 	return nil
 }
@@ -359,15 +392,29 @@ func (a *App) cmdWithLease(args []string) error {
 	cmd.Stdout = a.stdout
 	cmd.Stderr = a.stderr
 	cmd.Stdin = os.Stdin
-	cmd.Env = append(os.Environ(),
-		"ANDROID_SERIAL="+result.Serial,
+	cmd.Env = append(environmentWithout(os.Environ(),
+		"ANDROID_SERIAL",
+		"ROBORANCH_DEVICE_ID",
+		"ROBORANCH_LEASE_ID",
+		"ROBORANCH_PLATFORM",
+		"ROBORANCH_DEVICE_TYPE",
+		"ROBORANCH_TARGET_ID",
+		"ROBORANCH_IOS_UDID",
+		"ROBORANCH_XCODE_DESTINATION",
+	),
 		"ROBORANCH_DEVICE_ID="+result.ID,
 		"ROBORANCH_LEASE_ID="+result.Lease,
+		"ROBORANCH_PLATFORM="+string(result.Platform),
+		"ROBORANCH_DEVICE_TYPE="+string(result.Type),
+		"ROBORANCH_TARGET_ID="+result.Serial,
 	)
+	cmd.Env = append(cmd.Env, rt.backends.forDevice(device).environment(device)...)
 	childErr := cmd.Run()
-	rt.adb.cleanup(context.Background(), device, a.stderr)
-	releaseErr := rt.store.release(result.ID, result.Lease)
+	releaseErr := a.releaseDevice(context.Background(), rt, device, result.Lease)
 	if childErr != nil {
+		if releaseErr != nil {
+			fmt.Fprintf(a.stderr, "roboranch: release failed; lease retained: %s\n", releaseErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(childErr, &exitErr) {
 			return commandError{code: exitErr.ExitCode(), err: fmt.Errorf("command exited with %d", exitErr.ExitCode())}
@@ -375,7 +422,7 @@ func (a *App) cmdWithLease(args []string) error {
 		return commandError{code: exitUnavailable, err: childErr}
 	}
 	if releaseErr != nil {
-		return commandError{code: exitUnavailable, err: releaseErr}
+		return releaseErr
 	}
 	return nil
 }
@@ -383,7 +430,7 @@ func (a *App) cmdWithLease(args []string) error {
 func (a *App) cmdRepair(args []string) error {
 	fs := newFlagSet("repair", a.stderr)
 	id := fs.String("id", "", "device id")
-	all := fs.Bool("all", false, "repair all emulators")
+	all := fs.Bool("all", false, "repair all virtual devices")
 	if err := fs.Parse(args); err != nil {
 		return commandError{code: exitUsage, err: err}
 	}
@@ -394,30 +441,47 @@ func (a *App) cmdRepair(args []string) error {
 	if err != nil {
 		return err
 	}
-	healthy, repaired, failed := 0, 0, 0
+	if *id != "" {
+		device, ok := findDevice(rt.config.Devices, *id)
+		if !ok {
+			return commandError{code: exitUsage, err: fmt.Errorf("unknown device id %q", *id)}
+		}
+		if !rt.backends.forDevice(device).repairable(device) {
+			return commandError{code: exitUsage, err: fmt.Errorf("%s is not repairable", device.ID)}
+		}
+	}
+	healthy, repaired, failed, skipped := 0, 0, 0, 0
 	for _, device := range rt.config.Devices {
-		if device.Type != DeviceTypeEmulator {
+		backend := rt.backends.forDevice(device)
+		if !backend.repairable(device) {
 			continue
 		}
 		if *id != "" && device.ID != *id {
 			continue
 		}
-		if rt.adb.healthy(context.Background(), device) {
+		if rt.store.locked(device.ID) {
+			if stale, _ := rt.store.stale(device.ID, time.Now()); !stale {
+				skipped++
+				fmt.Fprintf(a.stderr, "roboranch: repair: %s skipped; active lease\n", device.ID)
+				continue
+			}
+		}
+		if backend.health(context.Background(), device).healthy {
 			healthy++
 			fmt.Fprintf(a.stderr, "roboranch: repair: %s healthy\n", device.ID)
 			continue
 		}
 		fmt.Fprintf(a.stderr, "roboranch: repair: restarting %s\n", device.ID)
-		if err := rt.host.repair(context.Background(), rt.config, rt.adb, device); err != nil {
+		if err := backend.repair(context.Background(), rt.config, device); err != nil {
 			failed++
 			fmt.Fprintf(a.stderr, "roboranch: repair: %s failed: %s\n", device.ID, err)
 			continue
 		}
 		repaired++
 	}
-	fmt.Fprintf(a.stderr, "roboranch: repair done (healthy=%d repaired=%d failed=%d)\n", healthy, repaired, failed)
-	if failed > 0 {
-		return commandError{code: exitUnhealthy, err: fmt.Errorf("repair failed for %d emulator(s)", failed)}
+	fmt.Fprintf(a.stderr, "roboranch: repair done (healthy=%d repaired=%d failed=%d skipped=%d)\n", healthy, repaired, failed, skipped)
+	if failed > 0 || (*id != "" && skipped > 0) {
+		return commandError{code: exitUnhealthy, err: fmt.Errorf("repair failed or was refused for %d target(s)", failed+skipped)}
 	}
 	return nil
 }
@@ -439,17 +503,86 @@ func (a *App) cmdGC(args []string) error {
 			fmt.Fprintf(a.stderr, "roboranch: "+format+"\n", values...)
 		}
 	}
-	reaped := rt.store.gc(logger)
+	reaped, retained := a.gc(context.Background(), rt, logger)
 	if logger != nil {
-		fmt.Fprintf(a.stderr, "roboranch: gc done: reaped=%d\n", reaped)
+		fmt.Fprintf(a.stderr, "roboranch: gc done: reaped=%d retained=%d\n", reaped, retained)
+	}
+	if retained > 0 {
+		return commandError{code: exitUnhealthy, err: fmt.Errorf("cleanup failed for %d stale lease(s)", retained)}
 	}
 	return nil
+}
+
+func (a *App) releaseDevice(ctx context.Context, rt *runtimeState, device DeviceConfig, expectedLease string) error {
+	if err := rt.store.validateRelease(device.ID, expectedLease); err != nil {
+		return commandError{code: exitUsage, err: err}
+	}
+	claimed, err := rt.store.claimCleanup(device.ID, os.Getpid())
+	if err != nil {
+		return commandError{code: exitUnavailable, err: err}
+	}
+	if !claimed {
+		return commandError{code: exitUnavailable, err: fmt.Errorf("cleanup already in progress for %s", device.ID)}
+	}
+	defer rt.store.clearCleanup(device.ID)
+	if err := rt.backends.forDevice(device).cleanup(ctx, rt.config, device, a.stderr); err != nil {
+		return commandError{code: exitUnhealthy, err: fmt.Errorf("cleanup failed; lease retained for %s: %w", device.ID, err)}
+	}
+	if err := rt.store.forceRelease(device.ID); err != nil {
+		return commandError{code: exitUnavailable, err: err}
+	}
+	return nil
+}
+
+func (a *App) gc(ctx context.Context, rt *runtimeState, verbose func(string, ...any)) (int, int) {
+	reaped, retained := 0, 0
+	for _, stale := range rt.store.staleLeases(time.Now()) {
+		claimed, err := rt.store.claimCleanup(stale.ID, os.Getpid())
+		if err != nil {
+			retained++
+			if verbose != nil {
+				verbose("retained %s (%s; cleanup claim failed: %s)", stale.ID, stale.Reason, err)
+			}
+			continue
+		}
+		if !claimed {
+			if verbose != nil {
+				verbose("skipped %s (%s; cleanup already in progress)", stale.ID, stale.Reason)
+			}
+			continue
+		}
+		device, configured := findDevice(rt.config.Devices, stale.ID)
+		if configured && device.cleanupEnabled() {
+			if err := rt.backends.forDevice(device).cleanup(ctx, rt.config, device, a.stderr); err != nil {
+				rt.store.clearCleanup(stale.ID)
+				retained++
+				if verbose != nil {
+					verbose("retained %s (%s; cleanup failed: %s)", stale.ID, stale.Reason, err)
+				}
+				continue
+			}
+		}
+		if err := rt.store.forceRelease(stale.ID); err != nil {
+			rt.store.clearCleanup(stale.ID)
+			retained++
+			if verbose != nil {
+				verbose("retained %s (%s; unlock failed: %s)", stale.ID, stale.Reason, err)
+			}
+			continue
+		}
+		rt.store.clearCleanup(stale.ID)
+		reaped++
+		if verbose != nil {
+			verbose("reaped %s (%s)", stale.ID, stale.Reason)
+		}
+	}
+	return reaped, retained
 }
 
 func (a *App) checkout(ctx context.Context, rt *runtimeState, options checkoutOptions) (CheckoutResult, int, error) {
 	deadline := time.Now().Add(options.wait)
 	for {
-		rt.store.gc(nil)
+		_, _ = a.gc(ctx, rt, nil)
 		result, code, err := a.tryCheckout(ctx, rt, options)
 		if err == nil {
 			return result, exitOK, nil
@@ -466,7 +599,7 @@ func (a *App) checkout(ctx context.Context, rt *runtimeState, options checkoutOp
 }
 
 func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkoutOptions) (CheckoutResult, int, error) {
-	candidates := filterDevices(rt.config.Devices, options.deviceType, options.serial, options.labels)
+	candidates := filterDevices(rt.config.Devices, options.platform, options.deviceType, options.serial, options.labels)
 	if len(candidates) == 0 {
 		return CheckoutResult{}, exitUsage, fmt.Errorf("no device matches selectors")
 	}
@@ -474,20 +607,22 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 	hadHealthy := false
 	hadLocked := false
 	for _, device := range candidates {
+		backend := rt.backends.forDevice(device)
 		if rt.store.locked(device.ID) {
 			hadLocked = true
 			fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
 			continue
 		}
-		if !rt.adb.healthy(ctx, device) {
-			if device.Type == DeviceTypeEmulator {
+		health := backend.health(ctx, device)
+		if !health.healthy {
+			if backend.repairable(device) {
 				fmt.Fprintf(a.stderr, "roboranch: repair: %s unhealthy; attempting restart\n", device.ID)
-				if err := rt.host.repair(ctx, rt.config, rt.adb, device); err != nil {
+				if err := backend.repair(ctx, rt.config, device); err != nil {
 					fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, err)
 					continue
 				}
 			} else {
-				fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy\n", device.ID)
+				fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, health.reason)
 				continue
 			}
 		}
@@ -504,6 +639,7 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 		return CheckoutResult{
 			Lease:     lease.LeaseID,
 			ID:        lease.ID,
+			Platform:  device.Platform,
 			Serial:    lease.Serial,
 			Type:      lease.Type,
 			ExpiresAt: lease.ExpiresAt,
@@ -535,25 +671,32 @@ func (a *App) status(ctx context.Context, rt *runtimeState, device DeviceConfig)
 	var holderAlive *bool
 	if locked {
 		if current, err := rt.store.readLease(device.ID); err == nil {
+			if current.Platform == "" {
+				current.Platform = device.Platform
+			}
 			lease = current
 			alive := processAlive(current.HolderPID)
 			holderAlive = &alive
 		}
 	}
+	health := rt.backends.forDevice(device).health(ctx, device)
 	return DeviceStatus{
-		ID:          device.ID,
-		Type:        device.Type,
-		Serial:      device.Serial,
-		Labels:      append([]string(nil), device.Labels...),
-		Locked:      locked,
-		Healthy:     rt.adb.healthy(ctx, device),
-		Lease:       lease,
-		HolderAlive: holderAlive,
+		ID:           device.ID,
+		Platform:     device.Platform,
+		Type:         device.Type,
+		Serial:       device.Serial,
+		Labels:       append([]string(nil), device.Labels...),
+		Locked:       locked,
+		Healthy:      health.healthy,
+		HealthReason: health.reason,
+		Lease:        lease,
+		HolderAlive:  holderAlive,
 	}
 }
 
 func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease bool, stderr io.Writer) (checkoutOptions, error) {
 	fs := newFlagSet("checkout", stderr)
+	platformRaw := fs.String("platform", string(PlatformAndroid), "target platform")
 	typeRaw := fs.String("type", string(DeviceTypeAny), "device type")
 	serial := fs.String("serial", "", "serial")
 	ttlRaw := fs.String("ttl", defaultTTL.String(), "lease ttl")
@@ -568,11 +711,17 @@ func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease boo
 	if withLease && *jsonMode {
 		return checkoutOptions{}, fmt.Errorf("with-lease does not support --json")
 	}
+	platform := Platform(*platformRaw)
+	switch platform {
+	case PlatformAny, PlatformAndroid, PlatformIOS:
+	default:
+		return checkoutOptions{}, fmt.Errorf("--platform must be android, ios, or any")
+	}
 	deviceType := DeviceType(*typeRaw)
 	switch deviceType {
-	case DeviceTypeAny, DeviceTypeEmulator, DeviceTypePhysical:
+	case DeviceTypeAny, DeviceTypeEmulator, DeviceTypeSimulator, DeviceTypePhysical:
 	default:
-		return checkoutOptions{}, fmt.Errorf("--type must be emulator, device, or any")
+		return checkoutOptions{}, fmt.Errorf("--type must be emulator, simulator, device, or any")
 	}
 	ttl, err := parseDuration(*ttlRaw, defaultTTL)
 	if err != nil {
@@ -589,6 +738,7 @@ func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease boo
 		return checkoutOptions{}, fmt.Errorf("--wait must be zero or greater")
 	}
 	return checkoutOptions{
+		platform:   platform,
 		deviceType: deviceType,
 		serial:     *serial,
 		labels:     labels,
@@ -599,9 +749,12 @@ func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease boo
 	}, nil
 }
 
-func filterDevices(devices []DeviceConfig, deviceType DeviceType, serial string, labels []string) []DeviceConfig {
+func filterDevices(devices []DeviceConfig, platform Platform, deviceType DeviceType, serial string, labels []string) []DeviceConfig {
 	var filtered []DeviceConfig
 	for _, device := range devices {
+		if platform != "" && platform != PlatformAny && device.Platform != platform {
+			continue
+		}
 		if deviceType != "" && deviceType != DeviceTypeAny && device.Type != deviceType {
 			continue
 		}
@@ -671,6 +824,21 @@ func yesNo(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func environmentWithout(environment []string, keys ...string) []string {
+	excluded := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		excluded[key] = true
+	}
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if !excluded[key] {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func exampleConfig() string {

@@ -1,6 +1,6 @@
-# macOS Quickstart
+# macOS Android Quickstart
 
-This path is for a local Mac or a self-hosted macOS GitHub Actions runner.
+This path is for an Android pool on a local Mac or self-hosted macOS GitHub Actions runner. For iOS simulators and physical iPhones, see [iOS Quickstart](quickstart-ios.md).
 
 ## 1. Create AVDs
 
@@ -48,4 +48,3 @@ roboranch doctor
 roboranch list
 roboranch with-lease --type emulator --wait 5m -- adb devices
 ```
-

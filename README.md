@@ -4,25 +4,47 @@
   <img src="assets/roboranch-gate.svg" alt="RoboRanch gate mark" width="220">
 </p>
 
-RoboRanch is a lightweight Android emulator and device lease broker for local developers, agentic coding sessions, and CI runners.
+RoboRanch is a lightweight Android and iOS target lease broker for local developers, agentic coding sessions, and CI runners.
 
-It is intentionally smaller than Appium Grid, Selenium Grid, or a device cloud. Those tools route test protocols. RoboRanch manages the host-level pool underneath: which emulator or device is free, how long a job may hold it, whether it is healthy, and how to clean it before the next job.
+It is intentionally smaller than Appium Grid, Selenium Grid, or a device cloud. Those tools route test protocols. RoboRanch manages the host-level pool underneath: which target is free, how long a job may hold it, whether it is healthy, and how to clean it before the next job.
+
+## Supported Targets
+
+| Platform | Config `type` | Host tooling | Health and release behavior |
+| --- | --- | --- | --- |
+| Android emulator | `emulator` | `adb`, Android Emulator | Repairs unhealthy AVDs and removes third-party apps on release by default |
+| Android device | `device` | `adb` | Health-checks attached hardware; cleanup is opt-in |
+| iOS simulator | `simulator` | macOS, Xcode, `simctl` | Boots shutdown simulators, then erases and warm-boots them on release |
+| Physical iPhone | `device` | macOS, Xcode, `devicectl` | Requires a paired, connected, unlocked Developer Mode device; never mutates it |
+
+iOS support is macOS-only. Existing configurations remain Android-compatible because a missing `platform` field means `android`, and checkout defaults to `--platform android`.
 
 ## What It Does
 
-RoboRanch gives multiple local terminals, coding agents, build scripts, and CI jobs a shared way to lease Android targets:
+RoboRanch gives multiple local terminals, coding agents, build scripts, and CI jobs a shared way to lease Android and iOS targets:
 
 ```sh
 roboranch with-lease --type emulator --label api36 --wait 20m -- ./gradlew connectedDebugAndroidTest
 ```
 
-While the command runs, RoboRanch exports:
+For an iOS simulator:
 
-- `ANDROID_SERIAL`
+```sh
+roboranch with-lease --platform ios --type simulator --label ios26 --wait 20m -- \
+  sh -c 'xcodebuild test -scheme MyApp -destination "$ROBORANCH_XCODE_DESTINATION"'
+```
+
+While the command runs, RoboRanch always exports:
+
 - `ROBORANCH_DEVICE_ID`
 - `ROBORANCH_LEASE_ID`
+- `ROBORANCH_PLATFORM`
+- `ROBORANCH_DEVICE_TYPE`
+- `ROBORANCH_TARGET_ID`
 
-When the command exits, RoboRanch cleans the emulator and releases the lease.
+Android leases also export `ANDROID_SERIAL`. iOS leases export `ROBORANCH_IOS_UDID` and `ROBORANCH_XCODE_DESTINATION`.
+
+When the command exits, RoboRanch applies the target's cleanup policy and releases the lease. iOS simulators are erased and returned warm; physical iPhones are never mutated.
 
 ## Install
 
@@ -66,13 +88,11 @@ If you built locally, either add `./bin` to `PATH` or run `./bin/roboranch`.
 
 ## Prerequisites
 
-Each host that runs RoboRanch needs:
+Every host needs a shared RoboRanch config and state directory. Platform tooling depends on the targets it serves:
 
-- Android SDK platform tools, especially `adb`
-- Android emulator binaries if using emulators
-- at least one bootable AVD or attached physical device
-- a shared RoboRanch config for all jobs on that host
-- a shared RoboRanch state directory for locks and lease metadata
+- Android: SDK platform tools (`adb`) and a bootable AVD or attached Android device.
+- iOS: macOS with Xcode and `xcrun simctl`.
+- Physical iPhone: `xcrun devicectl`, a paired and unlocked phone, Developer Mode enabled, and developer services connected.
 
 RoboRanch discovers the Android SDK from:
 
@@ -132,6 +152,13 @@ A complete sanitized example is in [examples/pool.example.json](examples/pool.ex
       "serial": "REPLACE_WITH_ADB_SERIAL",
       "labels": ["device", "physical"],
       "cleanup": {"enabled": false}
+    },
+    {
+      "id": "ios-sim-1",
+      "platform": "ios",
+      "type": "simulator",
+      "serial": "REPLACE_WITH_SIMULATOR_UDID",
+      "labels": ["simulator", "ios26", "iphone"]
     }
   ]
 }
@@ -142,12 +169,13 @@ Important fields:
 - `stateDir`: shared lock, lease, and log directory for this host.
 - `androidSdk`: optional SDK path. Leave empty to use environment/default discovery.
 - `defaultTTL`: default lease lifetime. Expired leases are reaped by `gc` and before checkout.
-- `repairTimeout`: how long emulator repair waits for boot.
+- `repairTimeout`: how long virtual-target repair and cleanup wait for boot.
 - `devices[].id`: stable RoboRanch id used for leases.
-- `devices[].type`: `emulator` or `device`.
-- `devices[].serial`: ADB serial, such as `emulator-5554` or a USB device serial from `adb devices`.
+- `devices[].platform`: `android` or `ios`; omitted means `android` for compatibility.
+- `devices[].type`: `emulator`, `simulator`, or `device`, as appropriate for the platform.
+- `devices[].serial`: ADB serial for Android or UDID for iOS.
 - `devices[].labels`: selectors used by jobs, such as `api36`, `x86_64`, `pixel`, or `physical`.
-- `devices[].cleanup.enabled`: physical device cleanup is disabled by default; emulator cleanup is enabled by default.
+- `devices[].cleanup.enabled`: virtual-target cleanup is enabled by default; physical-device cleanup is disabled. Physical iPhone cleanup cannot be enabled.
 - `devices[].launchdLabel`: macOS service name used by `repair`.
 - `devices[].systemdUnit`: Linux user service name used by `repair`.
 
@@ -159,7 +187,7 @@ roboranch list
 roboranch list --json
 ```
 
-## Local Development Setup
+## Android Local Development Setup
 
 Use this mode when a developer machine has one or more already-running emulators or USB devices.
 
@@ -206,7 +234,45 @@ roboranch release --id "$id" --lease "$lease"
 
 Prefer `with-lease` for normal use because it releases automatically.
 
-## Warm Local Emulator Pool
+## iOS Setup
+
+iOS targets require macOS and Xcode. RoboRanch manages fixed, pre-created simulator UDIDs; it does not dynamically create or clone simulators.
+
+List available simulator UDIDs:
+
+```sh
+xcrun simctl list devices available
+```
+
+Add one to the pool and verify it:
+
+```json
+{
+  "id": "ios-sim-1",
+  "platform": "ios",
+  "type": "simulator",
+  "serial": "REPLACE_WITH_SIMULATOR_UDID",
+  "labels": ["simulator", "ios26", "iphone", "pool-1"]
+}
+```
+
+```sh
+roboranch doctor
+roboranch list
+roboranch with-lease --platform ios --type simulator --label ios26 --wait 5m -- \
+  sh -c 'xcrun simctl bootstatus "$ROBORANCH_IOS_UDID"'
+```
+
+Physical iPhones use `type: "device"`. They are leasable only while paired, connected to developer services, unlocked, and in Developer Mode. RoboRanch never pairs, unlocks, repairs, erases, or uninstalls apps from them.
+
+```sh
+roboranch with-lease --platform ios --type device --wait 10m -- \
+  sh -c 'xcodebuild test -scheme MyApp -destination "$ROBORANCH_XCODE_DESTINATION"'
+```
+
+See [docs/quickstart-ios.md](docs/quickstart-ios.md) for complete simulator-pool, physical-device, and `xcodebuild` examples.
+
+## Warm Local Android Emulator Pool
 
 For faster repeated tests, keep emulators running from a clean snapshot and let RoboRanch lease them.
 
@@ -296,9 +362,9 @@ Configure the matching device with `systemdUnit`:
 
 ## Remote Runner Setup
 
-RoboRanch is most useful on self-hosted runners because the emulator pool can stay warm across jobs. It can also wrap a single emulator on an ephemeral hosted runner, but hosted runners do not get the same warm-pool benefit.
+RoboRanch is most useful on self-hosted runners because virtual-device pools can stay warm across jobs. It can also wrap a single target on an ephemeral hosted runner, but hosted runners do not get the same warm-pool benefit.
 
-### Self-hosted GitHub Actions Runner
+### Self-hosted Android Runner
 
 On the runner host:
 
@@ -337,7 +403,18 @@ runs-on: [self-hosted, Linux, android]
 
 The important part is that all concurrent jobs on the same runner host share the same `ROBORANCH_CONFIG` and `stateDir`.
 
-### GitHub-hosted Runner
+### Self-hosted iOS Runner
+
+For iOS, use a self-hosted macOS runner with pre-created simulator UDIDs:
+
+```yaml
+- name: Run iOS tests
+  run: |
+    roboranch with-lease --platform ios --type simulator --label ios26 --wait 20m -- \
+      sh -c 'xcodebuild test -scheme MyApp -destination "$ROBORANCH_XCODE_DESTINATION"'
+```
+
+### GitHub-hosted Android Runner
 
 Use this mode when the workflow creates and boots one emulator inside the job. RoboRanch will still provide consistent lease and cleanup behavior, but it will not provide a pre-warmed pool across jobs.
 
@@ -376,7 +453,7 @@ If your emulator serial differs, generate the config after `adb devices` reports
 
 ## Cleanup Policy
 
-Emulators are cleaned by default on release:
+Android emulators are cleaned by default on release:
 
 - uninstall third-party packages
 - force-stop packages before uninstall
@@ -398,6 +475,10 @@ Physical devices are not cleaned by default. Enable cleanup per physical device 
 }
 ```
 
+iOS simulators are cleaned strictly: RoboRanch shuts them down, erases their contents and settings, boots them again, and waits for boot completion before releasing the lock. If erase or warm boot fails, the lease remains locked for `release` or `gc` to retry.
+
+Physical iPhone cleanup is intentionally unsupported. Config validation rejects `cleanup.enabled: true` for an iOS `device`.
+
 ## Command Reference
 
 ```text
@@ -405,7 +486,7 @@ roboranch init [--force]
 roboranch doctor
 roboranch list [--json]
 roboranch status --id ID [--json]
-roboranch checkout [--type emulator|device|any] [--label LABEL] [--serial SERIAL] [--ttl DURATION] [--wait DURATION] [--json]
+roboranch checkout [--platform android|ios|any] [--type emulator|simulator|device|any] [--label LABEL] [--serial SERIAL_OR_UDID] [--ttl DURATION] [--wait DURATION] [--json]
 roboranch release --id ID [--lease LEASE]
 roboranch with-lease [checkout selectors] -- CMD [ARGS...]
 roboranch repair --id ID|--all
