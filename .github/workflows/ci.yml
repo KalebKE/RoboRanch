@@ -19,7 +19,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - run: |
+          go test ./...
+          go vet ./...
 
   build:
     name: Build release targets
@@ -45,4 +47,3 @@ jobs:
           cache: true
       - run: mkdir -p dist
       - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/roboranch-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/roboranch
-

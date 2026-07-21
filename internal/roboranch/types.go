@@ -15,12 +15,21 @@ const (
 	defaultRepairTimeout = 2 * time.Minute
 )
 
+type Platform string
+
+const (
+	PlatformAny     Platform = "any"
+	PlatformAndroid Platform = "android"
+	PlatformIOS     Platform = "ios"
+)
+
 type DeviceType string
 
 const (
-	DeviceTypeAny      DeviceType = "any"
-	DeviceTypeEmulator DeviceType = "emulator"
-	DeviceTypePhysical DeviceType = "device"
+	DeviceTypeAny       DeviceType = "any"
+	DeviceTypeEmulator  DeviceType = "emulator"
+	DeviceTypeSimulator DeviceType = "simulator"
+	DeviceTypePhysical  DeviceType = "device"
 )
 
 type Config struct {
@@ -39,6 +48,7 @@ type BackendConfig struct {
 
 type DeviceConfig struct {
 	ID            string         `json:"id"`
+	Platform      Platform       `json:"platform,omitempty"`
 	Type          DeviceType     `json:"type"`
 	Serial        string         `json:"serial"`
 	Labels        []string       `json:"labels,omitempty"`
@@ -63,12 +73,13 @@ func (d DeviceConfig) cleanupEnabled() bool {
 	if d.Cleanup != nil && d.Cleanup.Enabled != nil {
 		return *d.Cleanup.Enabled
 	}
-	return d.Type == DeviceTypeEmulator
+	return d.Type == DeviceTypeEmulator || d.Type == DeviceTypeSimulator
 }
 
 type Lease struct {
 	LeaseID    string     `json:"lease"`
 	ID         string     `json:"id"`
+	Platform   Platform   `json:"platform,omitempty"`
 	Serial     string     `json:"serial"`
 	Type       DeviceType `json:"type"`
 	HolderPID  int        `json:"holderPid"`
@@ -78,19 +89,22 @@ type Lease struct {
 }
 
 type DeviceStatus struct {
-	ID          string     `json:"id"`
-	Type        DeviceType `json:"type"`
-	Serial      string     `json:"serial"`
-	Labels      []string   `json:"labels,omitempty"`
-	Locked      bool       `json:"locked"`
-	Healthy     bool       `json:"healthy"`
-	Lease       *Lease     `json:"lease,omitempty"`
-	HolderAlive *bool      `json:"holderAlive,omitempty"`
+	ID           string     `json:"id"`
+	Platform     Platform   `json:"platform"`
+	Type         DeviceType `json:"type"`
+	Serial       string     `json:"serial"`
+	Labels       []string   `json:"labels,omitempty"`
+	Locked       bool       `json:"locked"`
+	Healthy      bool       `json:"healthy"`
+	HealthReason string     `json:"healthReason,omitempty"`
+	Lease        *Lease     `json:"lease,omitempty"`
+	HolderAlive  *bool      `json:"holderAlive,omitempty"`
 }
 
 type CheckoutResult struct {
 	Lease     string     `json:"lease"`
 	ID        string     `json:"id"`
+	Platform  Platform   `json:"platform"`
 	Serial    string     `json:"serial"`
 	Type      DeviceType `json:"type"`
 	ExpiresAt time.Time  `json:"expiresAt"`

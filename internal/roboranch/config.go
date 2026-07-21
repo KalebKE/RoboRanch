@@ -95,6 +95,9 @@ func (c *Config) applyDefaultsAndValidate() error {
 		device := &c.Devices[i]
 		device.ID = strings.TrimSpace(device.ID)
 		device.Serial = strings.TrimSpace(device.Serial)
+		if device.Platform == "" {
+			device.Platform = PlatformAndroid
+		}
 		if device.ID == "" {
 			return fmt.Errorf("devices[%d].id is required", i)
 		}
@@ -105,10 +108,27 @@ func (c *Config) applyDefaultsAndValidate() error {
 		if device.Serial == "" {
 			return fmt.Errorf("device %q serial is required", device.ID)
 		}
-		switch device.Type {
-		case DeviceTypeEmulator, DeviceTypePhysical:
+		switch device.Platform {
+		case PlatformAndroid:
+			switch device.Type {
+			case DeviceTypeEmulator, DeviceTypePhysical:
+			default:
+				return fmt.Errorf("device %q type must be emulator or device for platform android", device.ID)
+			}
+		case PlatformIOS:
+			switch device.Type {
+			case DeviceTypeSimulator, DeviceTypePhysical:
+			default:
+				return fmt.Errorf("device %q type must be simulator or device for platform ios", device.ID)
+			}
+			if device.Type == DeviceTypePhysical && device.cleanupEnabled() {
+				return fmt.Errorf("device %q cannot enable cleanup for a physical iOS device", device.ID)
+			}
+			if device.SystemdUnit != "" || device.LaunchdLabel != "" || device.AVD != "" || device.Port != 0 || device.Snapshot != "" || len(device.EmulatorFlags) > 0 {
+				return fmt.Errorf("device %q uses Android emulator fields with platform ios", device.ID)
+			}
 		default:
-			return fmt.Errorf("device %q type must be emulator or device", device.ID)
+			return fmt.Errorf("device %q platform must be android or ios", device.ID)
 		}
 		if device.Labels == nil {
 			device.Labels = []string{}
@@ -123,6 +143,24 @@ func (c *Config) applyDefaultsAndValidate() error {
 		}
 	}
 	return nil
+}
+
+func (c Config) hasPlatform(platform Platform) bool {
+	for _, device := range c.Devices {
+		if device.Platform == platform {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Config) hasDevice(platform Platform, deviceType DeviceType) bool {
+	for _, device := range c.Devices {
+		if device.Platform == platform && device.Type == deviceType {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Config) adbPath() string {
