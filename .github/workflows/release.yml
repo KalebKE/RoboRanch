@@ -54,6 +54,13 @@ jobs:
             echo "::error::HOMEBREW_TAP_GITHUB_TOKEN is not set. Mint a fine-grained PAT with Contents read/write on KalebKE/homebrew-tap and run: gh secret set HOMEBREW_TAP_GITHUB_TOKEN --repo KalebKE/RoboRanch. To ship without the tap on purpose, dispatch with skip_tap=true."
             exit 1
           fi
+          # An existence check is not enough: a wrong-account or wrong-scope
+          # token would pass here and fail after the release is published.
+          # Prove the token can actually reach the tap repo before building.
+          if ! git ls-remote "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/KalebKE/homebrew-tap.git" HEAD > /dev/null 2>&1; then
+            echo "::error::HOMEBREW_TAP_GITHUB_TOKEN is set but cannot read KalebKE/homebrew-tap. It needs a fine-grained PAT with Contents read/write on that repo (an org token or read-only token will not work)."
+            exit 1
+          fi
 
       - name: Test
         run: |
