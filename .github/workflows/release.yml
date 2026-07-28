@@ -9,6 +9,10 @@ on:
       tag:
         description: "Release tag, for example v0.1.0"
         required: true
+      skip_tap:
+        description: "Skip the Homebrew tap update (intentional tap-less release)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -35,6 +39,22 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+      # The tap update is part of the release contract, so a missing token
+      # fails HERE, before anything builds or publishes. Failing at the tap
+      # step instead would publish the release first and then go red,
+      # leaving a live release with a stale tap — the exact half-shipped
+      # state this check exists to prevent (observed at v0.2.0, where the
+      # old skip-and-exit-0 shipped a green run and a stale formula).
+      - name: Require tap credentials
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tap) }}
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_GITHUB_TOKEN:-}" ]; then
+            echo "::error::HOMEBREW_TAP_GITHUB_TOKEN is not set. Mint a fine-grained PAT with Contents read/write on KalebKE/homebrew-tap and run: gh secret set HOMEBREW_TAP_GITHUB_TOKEN --repo KalebKE/RoboRanch. To ship without the tap on purpose, dispatch with skip_tap=true."
+            exit 1
+          fi
+
       - name: Test
         run: |
           go test ./...
@@ -53,15 +73,11 @@ jobs:
             dist/checksums.txt
 
       - name: Update Homebrew tap
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tap) }}
         env:
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if [ -z "${HOMEBREW_TAP_GITHUB_TOKEN:-}" ]; then
-            echo "HOMEBREW_TAP_GITHUB_TOKEN is not set; skipping tap update."
-            exit 0
-          fi
-
           git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/KalebKE/homebrew-tap.git" tap
           mkdir -p tap/Formula
           scripts/render-homebrew-formula.sh "$TAG" dist/checksums.txt > tap/Formula/roboranch.rb
