@@ -64,7 +64,7 @@ brew install roboranch
 Install a release binary directly from [GitHub Releases](https://github.com/KalebKE/RoboRanch/releases):
 
 ```sh
-curl -L -o roboranch.tar.gz https://github.com/KalebKE/RoboRanch/releases/download/v0.1.0/roboranch_v0.1.0_darwin_arm64.tar.gz
+curl -L -o roboranch.tar.gz https://github.com/KalebKE/RoboRanch/releases/download/v0.2.0/roboranch_v0.2.0_darwin_arm64.tar.gz
 tar -xzf roboranch.tar.gz
 sudo mv roboranch /usr/local/bin/
 ```
@@ -85,6 +85,45 @@ go build -o bin/roboranch ./cmd/roboranch
 ```
 
 If you built locally, either add `./bin` to `PATH` or run `./bin/roboranch`.
+
+## Agent Setup
+
+The setup below is built to be done by a coding agent. Paste this prompt into
+Claude Code or Codex running on the host you want to serve targets from, and
+review what it reports back:
+
+```text
+Set up RoboRanch on this machine so builds and coding agents can lease
+Android emulators (and iOS simulators if this is a Mac with Xcode).
+
+Done means: `roboranch with-lease --type emulator --label <api-label> --wait 20m -- <cmd>`
+works from a fresh shell, and two concurrent leases receive two different targets.
+
+Work from the README at https://github.com/KalebKE/RoboRanch and `roboranch --help`:
+
+1. Install roboranch (Homebrew tap KalebKE/tap, or go install).
+2. Inventory the host's real targets: `adb devices`, `emulator -list-avds`,
+   and on macOS `xcrun simctl list devices available`. Never invent serials
+   or UDIDs; the pool describes what actually exists.
+3. Write ~/.config/roboranch/pool.json for those targets, with labels that
+   match API level or OS version (api36, ios26). Physical devices keep
+   cleanup disabled.
+4. If this host should keep emulators warm between jobs, install the launchd
+   (macOS) or systemd (Linux) unit from the README's warm-pool section.
+5. Verify with observable state, not assumptions: `roboranch list` shows the
+   pool, two concurrent with-lease runs export different ROBORANCH_DEVICE_ID
+   values, and the target is healthy again after release.
+
+Constraints: do not modify AVDs or simulators beyond what roboranch's own
+cleanup policy does, never mutate a physical device, and ask before
+installing system daemons. Finish with a short summary of what was
+installed, the pool you wrote, and the verification output.
+```
+
+The prompt encodes the boundaries that matter (real targets only, no device
+mutation, verification against observable state) and leaves the execution to
+the agent. On a host with unusual tooling paths, hand the agent the failing
+command output and let it adjust the pool config rather than editing by hand.
 
 ## Prerequisites
 
