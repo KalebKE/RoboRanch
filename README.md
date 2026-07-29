@@ -399,6 +399,18 @@ Configure the matching device with `systemdUnit`:
 }
 ```
 
+## Deployment Topologies
+
+<p align="center">
+  <img src="assets/roboranch-topologies.svg" alt="Three RoboRanch deployment topologies: runner and ranch on one build machine, a dedicated ranch machine serving device jobs and dev sessions, and everything on a single powerful machine" width="680">
+</p>
+
+The same binary supports three shapes:
+
+- **The runner is the ranch.** A build machine runs the GitHub runner agent, `roboranch`, and the warm pool together. Jobs land via `runs-on` labels and lease locally. This is the simplest setup and the one most of this README assumes.
+- **A dedicated ranch machine.** One machine holds the pool and also runs a runner agent. Device jobs route to it with `runs-on: [self-hosted, android]` while other build machines take non-device jobs, and dev machines reach the same pool over ssh. RoboRanch has no network server; co-locating a runner agent on the ranch is what makes remote jobs work.
+- **Everything on one powerful machine.** Dev terminals, coding agents, the runner agent, and the pool share one host. Concurrent leases stay safe because every process shares the same `ROBORANCH_CONFIG` and `stateDir`.
+
 ## Remote Runner Setup
 
 RoboRanch is most useful on self-hosted runners because virtual-device pools can stay warm across jobs. It can also wrap a single target on an ephemeral hosted runner, but hosted runners do not get the same warm-pool benefit.

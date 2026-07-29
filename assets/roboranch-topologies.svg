@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 812" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <rect x="0" y="0" width="680" height="812" rx="16" fill="#16161e" />
+  <defs><marker id="rrarrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7e8494" /></marker></defs>
+  <rect x="150" y="88" width="506" height="130" rx="10" fill="none" stroke="#3a3a4e" stroke-width="1.2" stroke-dasharray="5 4" />
+  <text x="162" y="104" font-size="10" fill="#7e8494">build machine · macOS or Linux</text>
+  <rect x="196" y="266" width="460" height="204" rx="10" fill="none" stroke="#3a3a4e" stroke-width="1.2" stroke-dasharray="5 4" />
+  <text x="208" y="282" font-size="10" fill="#7e8494">ranch machine · self-hosted runner host</text>
+  <rect x="24" y="530" width="632" height="216" rx="10" fill="none" stroke="#3a3a4e" stroke-width="1.2" stroke-dasharray="5 4" />
+  <text x="36" y="546" font-size="10" fill="#7e8494">one machine · dev + runner + ranch</text>
+  <line x1="124" y1="152" x2="172" y2="152" stroke="#7e8494" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="148" y="168" font-size="9.5" fill="#b0b4c0" text-anchor="middle">runs-on</text>
+  <line x1="284" y1="152" x2="356" y2="152" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="320" y="144" font-size="9.5" fill="#b0b4c0" text-anchor="middle">with-lease</text>
+  <line x1="460" y1="152" x2="532" y2="152" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="496" y="138" font-size="9.5" fill="#b0b4c0" text-anchor="middle">checkout ·</text>
+  <text x="496" y="149" font-size="9.5" fill="#b0b4c0" text-anchor="middle">cleanup</text>
+  <line x1="140" y1="312" x2="216" y2="344" stroke="#7e8494" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="352" y="302" font-size="9.5" fill="#b0b4c0" text-anchor="middle">runs-on: [self-hosted, android]</text>
+  <line x1="82" y1="340" x2="82" y2="366" stroke="#7e8494" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="96" y="358" font-size="9.5" fill="#b0b4c0" text-anchor="middle">other jobs</text>
+  <line x1="140" y1="470" x2="394" y2="390" stroke="#7e8494" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="262" y="444" font-size="9.5" fill="#b0b4c0" text-anchor="middle">ssh</text>
+  <line x1="338" y1="352" x2="394" y2="352" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="366" y="344" font-size="9.5" fill="#b0b4c0" text-anchor="middle">with-lease</text>
+  <line x1="490" y1="352" x2="546" y2="352" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="518" y="330" font-size="9.5" fill="#b0b4c0" text-anchor="middle">checkout ·</text>
+  <text x="518" y="341" font-size="9.5" fill="#b0b4c0" text-anchor="middle">cleanup</text>
+  <line x1="198" y1="592" x2="282" y2="624" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="236" y="596" font-size="9.5" fill="#b0b4c0" text-anchor="middle">with-lease</text>
+  <line x1="198" y1="682" x2="282" y2="650" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="236" y="684" font-size="9.5" fill="#b0b4c0" text-anchor="middle">with-lease</text>
+  <line x1="394" y1="636" x2="478" y2="636" stroke="#1f9bb8" stroke-width="1.4" marker-end="url(#rrarrow)" />
+  <text x="436" y="620" font-size="9.5" fill="#b0b4c0" text-anchor="middle">checkout ·</text>
+  <text x="436" y="631" font-size="9.5" fill="#b0b4c0" text-anchor="middle">cleanup</text>
+  <rect x="24" y="122" width="100" height="60" rx="6" fill="#1a1a24" stroke="#4a4a5e" stroke-width="1.2" />
+  <text x="36" y="146" font-size="12" font-weight="600" fill="#e8eaf0">GitHub</text>
+  <text x="36" y="162" font-size="10" font-weight="400" fill="#b0b4c0">Actions</text>
+  <rect x="172" y="122" width="112" height="60" rx="6" fill="#20202c" stroke="#7e8494" stroke-width="1.2" />
+  <text x="184" y="146" font-size="12" font-weight="600" fill="#e8eaf0">runner agent</text>
+  <text x="184" y="162" font-size="10" font-weight="400" fill="#b0b4c0">executes jobs</text>
+  <rect x="356" y="122" width="104" height="60" rx="6" fill="#132e38" stroke="#1f9bb8" stroke-width="1.2" />
+  <text x="368" y="146" font-size="12" font-weight="600" fill="#e8eaf0">roboranch</text>
+  <text x="368" y="162" font-size="10" font-weight="400" fill="#b0b4c0">lease broker</text>
+  <rect x="532" y="112" width="112" height="80" rx="6" fill="#132e38" stroke="#1f9bb8" stroke-width="1.2" />
+  <text x="544" y="136" font-size="12" font-weight="600" fill="#e8eaf0">warm pool</text>
+  <text x="544" y="152" font-size="10" font-weight="400" fill="#b0b4c0">AVDs · sims</text>
+  <text x="544" y="165" font-size="9" font-weight="400" fill="#7e8494">launchd / systemd</text>
+  <rect x="24" y="284" width="116" height="56" rx="6" fill="#1a1a24" stroke="#4a4a5e" stroke-width="1.2" />
+  <text x="36" y="308" font-size="12" font-weight="600" fill="#e8eaf0">GitHub</text>
+  <text x="36" y="324" font-size="10" font-weight="400" fill="#b0b4c0">Actions</text>
+  <rect x="24" y="366" width="116" height="60" rx="6" fill="#20202c" stroke="#7e8494" stroke-width="1.2" />
+  <text x="36" y="390" font-size="12" font-weight="600" fill="#e8eaf0">build machines</text>
+  <text x="36" y="406" font-size="10" font-weight="400" fill="#b0b4c0">non-device jobs</text>
+  <rect x="24" y="444" width="116" height="60" rx="6" fill="#20202c" stroke="#7e8494" stroke-width="1.2" />
+  <text x="36" y="468" font-size="12" font-weight="600" fill="#e8eaf0">dev machine</text>
+  <text x="36" y="484" font-size="10" font-weight="400" fill="#b0b4c0">terminals · agents</text>
+  <rect x="216" y="322" width="122" height="60" rx="6" fill="#20202c" stroke="#7e8494" stroke-width="1.2" />
+  <text x="228" y="346" font-size="12" font-weight="600" fill="#e8eaf0">runner agent</text>
+  <text x="228" y="362" font-size="10" font-weight="400" fill="#b0b4c0">device jobs</text>
+  <rect x="394" y="322" width="96" height="60" rx="6" fill="#132e38" stroke="#1f9bb8" stroke-width="1.2" />
+  <text x="406" y="346" font-size="12" font-weight="600" fill="#e8eaf0">roboranch</text>
+  <text x="406" y="362" font-size="10" font-weight="400" fill="#b0b4c0">lease broker</text>
+  <rect x="546" y="306" width="108" height="118" rx="6" fill="#132e38" stroke="#1f9bb8" stroke-width="1.2" />
+  <text x="558" y="330" font-size="12" font-weight="600" fill="#e8eaf0">warm pool</text>
+  <text x="558" y="346" font-size="10" font-weight="400" fill="#b0b4c0">AVDs · sims</text>
+  <text x="558" y="359" font-size="9" font-weight="400" fill="#7e8494">devices</text>
+  <rect x="48" y="560" width="150" height="60" rx="6" fill="#20202c" stroke="#7e8494" stroke-width="1.2" />
+  <text x="60" y="584" font-size="12" font-weight="600" fill="#e8eaf0">terminals · agents</text>
+  <text x="60" y="600" font-size="10" font-weight="400" fill="#b0b4c0">your dev sessions</text>
+  <rect x="48" y="654" width="150" height="60" rx="6" fill="#20202c" stroke="#7e8494" stroke-width="1.2" />
+  <text x="60" y="678" font-size="12" font-weight="600" fill="#e8eaf0">runner agent</text>
+  <text x="60" y="694" font-size="10" font-weight="400" fill="#b0b4c0">jobs via runs-on labels</text>
+  <rect x="282" y="606" width="112" height="60" rx="6" fill="#132e38" stroke="#1f9bb8" stroke-width="1.2" />
+  <text x="294" y="630" font-size="12" font-weight="600" fill="#e8eaf0">roboranch</text>
+  <text x="294" y="646" font-size="10" font-weight="400" fill="#b0b4c0">lease broker</text>
+  <rect x="478" y="590" width="154" height="100" rx="6" fill="#132e38" stroke="#1f9bb8" stroke-width="1.2" />
+  <text x="490" y="614" font-size="12" font-weight="600" fill="#e8eaf0">warm pool</text>
+  <text x="490" y="630" font-size="10" font-weight="400" fill="#b0b4c0">AVDs · simulators</text>
+  <text x="490" y="643" font-size="9" font-weight="400" fill="#7e8494">devices in a drawer</text>
+  <text x="24" y="26" font-size="14" font-weight="600" fill="#e8eaf0" text-anchor="start">RoboRanch deployment topologies</text>
+  <text x="24" y="44" font-size="11" font-weight="400" fill="#b0b4c0" text-anchor="start">Three ways to run the same binary. Teal is RoboRanch and the pool it manages.</text>
+  <text x="24" y="76" font-size="12" font-weight="600" fill="#b0b4c0" text-anchor="start">A · The runner is the ranch</text>
+  <text x="24" y="254" font-size="12" font-weight="600" fill="#b0b4c0" text-anchor="start">B · A dedicated ranch machine</text>
+  <text x="24" y="518" font-size="12" font-weight="600" fill="#b0b4c0" text-anchor="start">C · Everything on one powerful machine</text>
+  <text x="24" y="788" font-size="10" font-weight="400" fill="#7e8494" text-anchor="start">Concurrent leases stay safe because every process on a host shares one ROBORANCH_CONFIG and stateDir.</text>
+</svg>
