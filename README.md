@@ -6,7 +6,7 @@
 
 RoboRanch is a lightweight Android and iOS target lease broker for local developers, agentic coding sessions, and CI runners.
 
-It is intentionally smaller than Appium Grid, Selenium Grid, or a device cloud. Those tools route test protocols. RoboRanch manages the host-level pool underneath: which target is free, how long a job may hold it, whether it is healthy, and how to clean it before the next job.
+It is smaller than Appium Grid, Selenium Grid, or a device cloud. Those tools route test protocols. RoboRanch manages the host-level pool underneath. It tracks which target is free, how long a job may hold it, whether it is healthy, and how to clean it before the next job.
 
 ## Supported Targets
 
@@ -88,15 +88,15 @@ If you built locally, either add `./bin` to `PATH` or run `./bin/roboranch`.
 
 ## Agent Setup
 
-The setup below is built to be done by a coding agent. Paste this prompt into
-Claude Code or Codex running on the host you want to serve targets from, and
+This setup is meant to be done by a coding agent. Paste this prompt into
+Claude Code or Codex running on the host you want to serve targets from and
 review what it reports back:
 
 ```text
 Set up RoboRanch on this machine so builds and coding agents can lease
 Android emulators (and iOS simulators if this is a Mac with Xcode).
 
-Done means: `roboranch with-lease --type emulator --label <api-label> --wait 20m -- <cmd>`
+Done means `roboranch with-lease --type emulator --label <api-label> --wait 20m -- <cmd>`
 works from a fresh shell, and two concurrent leases receive two different targets.
 
 Work from the README at https://github.com/KalebKE/RoboRanch and `roboranch --help`:
@@ -104,26 +104,24 @@ Work from the README at https://github.com/KalebKE/RoboRanch and `roboranch --he
 1. Install roboranch (Homebrew tap KalebKE/tap, or go install).
 2. Inventory the host's real targets: `adb devices`, `emulator -list-avds`,
    and on macOS `xcrun simctl list devices available`. Never invent serials
-   or UDIDs; the pool describes what actually exists.
+   or UDIDs; the pool describes what exists on the host.
 3. Write ~/.config/roboranch/pool.json for those targets, with labels that
    match API level or OS version (api36, ios26). Physical devices keep
    cleanup disabled.
 4. If this host should keep emulators warm between jobs, install the launchd
    (macOS) or systemd (Linux) unit from the README's warm-pool section.
-5. Verify with observable state, not assumptions: `roboranch list` shows the
-   pool, two concurrent with-lease runs export different ROBORANCH_DEVICE_ID
-   values, and the target is healthy again after release.
+5. Verify with observable state: `roboranch list` shows the pool, two
+   concurrent with-lease runs export different ROBORANCH_DEVICE_ID values,
+   and the target is healthy again after release.
 
 Constraints: do not modify AVDs or simulators beyond what roboranch's own
-cleanup policy does, never mutate a physical device, and ask before
-installing system daemons. Finish with a short summary of what was
-installed, the pool you wrote, and the verification output.
+cleanup policy does. Never mutate a physical device. Ask before installing
+system daemons. Finish with a short summary of what was installed, the pool
+you wrote, and the verification output.
 ```
 
-The prompt encodes the boundaries that matter (real targets only, no device
-mutation, verification against observable state) and leaves the execution to
-the agent. On a host with unusual tooling paths, hand the agent the failing
-command output and let it adjust the pool config rather than editing by hand.
+On a host with unusual tooling paths, hand the agent the failing command
+output and let it adjust the pool config rather than editing by hand.
 
 ## Prerequisites
 
@@ -203,7 +201,7 @@ A complete sanitized example is in [examples/pool.example.json](examples/pool.ex
 }
 ```
 
-Important fields:
+The important fields are:
 
 - `stateDir`: shared lock, lease, and log directory for this host.
 - `androidSdk`: optional SDK path. Leave empty to use environment/default discovery.
@@ -315,7 +313,7 @@ See [docs/quickstart-ios.md](docs/quickstart-ios.md) for complete simulator-pool
 
 For faster repeated tests, keep emulators running from a clean snapshot and let RoboRanch lease them.
 
-Recommended pool shape:
+The recommended pool shape is:
 
 - one AVD per slot
 - one fixed port per AVD
@@ -336,7 +334,7 @@ pool-4 -> emulator-5560
 
 Use [templates/launchd/com.roboranch.pool-N.plist.tmpl](templates/launchd/com.roboranch.pool-N.plist.tmpl).
 
-Replace:
+Replace these placeholders:
 
 - `{{N}}`
 - `{{ANDROID_SDK}}`
@@ -370,7 +368,7 @@ Configure the matching device with `launchdLabel`:
 
 Use [templates/systemd/roboranch-pool-N.service.tmpl](templates/systemd/roboranch-pool-N.service.tmpl).
 
-Replace:
+Replace these placeholders:
 
 - `{{N}}`
 - `{{ANDROID_SDK}}`
@@ -513,7 +511,7 @@ Android emulators are cleaned by default on release:
 - clear logcat
 - reset animation scales to `0.0`
 
-RoboRanch intentionally does not call `pm trim-caches`; that command caused follow-on instrumentation installs to fail in the source pool.
+RoboRanch does not call `pm trim-caches`; that command caused follow-on instrumentation installs to fail in the source pool.
 
 Physical devices are not cleaned by default. Enable cleanup per physical device only when that is acceptable for that hardware:
 
@@ -526,9 +524,9 @@ Physical devices are not cleaned by default. Enable cleanup per physical device 
 }
 ```
 
-iOS simulators are cleaned strictly: RoboRanch shuts them down, erases their contents and settings, boots them again, and waits for boot completion before releasing the lock. If erase or warm boot fails, the lease remains locked for `release` or `gc` to retry.
+iOS simulators are cleaned strictly. RoboRanch shuts them down, erases their contents and settings, boots them again, and waits for boot completion before releasing the lock. If erase or warm boot fails, the lease remains locked for `release` or `gc` to retry.
 
-Physical iPhone cleanup is intentionally unsupported. Config validation rejects `cleanup.enabled: true` for an iOS `device`.
+Physical iPhone cleanup is unsupported. Config validation rejects `cleanup.enabled: true` for an iOS `device`.
 
 ## Command Reference
 
@@ -544,7 +542,7 @@ roboranch repair --id ID|--all
 roboranch gc [--verbose]
 ```
 
-Exit codes:
+The exit codes are:
 
 - `0`: success
 - `1`: matching devices are currently unavailable
