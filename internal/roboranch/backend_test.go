@@ -257,3 +257,40 @@ func TestAndroidHealthRejectsAWedgedDevice(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairRestartsAWedgedDeviceEvenThoughAdbAnswers(t *testing.T) {
+	// repair guarded on adb.healthy -- raw reachability -- while the CLI decided
+	// unhealthiness from backend.health, which now also fails a wedged device. The two
+	// disagreed, so repair printed "restarting" and returned nil without doing anything.
+	// Observed on three emulators with 22 days of uptime: repair reported repaired=3 and
+	// the same system_server window IDs were still on screen afterwards.
+	var restarted bool
+	runner := runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "launchctl" {
+			restarted = true
+			return "", nil
+		}
+		for _, a := range args {
+			if a == "get-state" {
+				return "device\n", nil
+			}
+			if a == "window" {
+				return "  mCurrentFocus=Window{85b3cb9 u0 Application Not Responding: system}\n", nil
+			}
+			if a == "sys.boot_completed" {
+				return "1\n", nil
+			}
+		}
+		return "", nil
+	})
+	host := HostManager{runner: runner}
+	adb := ADB{path: "adb", runner: runner}
+	device := DeviceConfig{ID: "ci-pool-2", Type: DeviceTypeEmulator, Serial: "emulator-5556", LaunchdLabel: "com.tracqi.emulator-pool-2"}
+
+	if err := host.repair(context.Background(), Config{}, adb, device); err != nil {
+		t.Fatalf("repair returned %v", err)
+	}
+	if !restarted {
+		t.Fatal("a wedged emulator was not restarted")
+	}
+}
