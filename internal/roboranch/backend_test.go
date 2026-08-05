@@ -207,3 +207,53 @@ func deviceCtlFixtureRunner(t *testing.T, pairing, developerMode string, ddi, lo
 		return "", nil
 	})
 }
+
+func TestAndroidHealthRejectsAWedgedDevice(t *testing.T) {
+	// `adb get-state` answers "device" long after the UI is unusable: a system_server ANR
+	// leaves a dialog owning the screen and stalls broadcast delivery, but adb keeps
+	// replying. The pool therefore handed out wedged emulators and `repair` blessed them
+	// ("healthy repaired=0") while the dialog was still up. Observed with three of four
+	// emulators wedged simultaneously and every one reported healthy.
+	tests := []struct {
+		name    string
+		focus   string
+		healthy bool
+	}{
+		{
+			name:    "idle launcher is healthy",
+			focus:   "  mCurrentFocus=Window{2c55bb1 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity}",
+			healthy: true,
+		},
+		{
+			name:  "system ANR is not",
+			focus: "  mCurrentFocus=Window{85b3cb9 u0 Application Not Responding: system}",
+		},
+		{
+			name:  "an app ANR is not either",
+			focus: "  mCurrentFocus=Window{2229c74 u0 Application Not Responding: com.google.android.apps.wellbeing}",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+				for _, a := range args {
+					if a == "get-state" {
+						return "device\n", nil
+					}
+					if a == "window" {
+						return test.focus + "\n", nil
+					}
+				}
+				return "", nil
+			})
+			backend := androidBackend{adb: ADB{path: "adb", runner: runner}}
+			got := backend.health(context.Background(), DeviceConfig{Serial: "emulator-5554"})
+			if got.healthy != test.healthy {
+				t.Fatalf("healthy = %v, want %v (reason %q)", got.healthy, test.healthy, got.reason)
+			}
+			if !test.healthy && !strings.Contains(strings.ToLower(got.reason), "not responding") {
+				t.Fatalf("reason should name the ANR, got %q", got.reason)
+			}
+		})
+	}
+}

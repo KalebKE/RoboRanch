@@ -51,10 +51,16 @@ type androidBackend struct {
 }
 
 func (b androidBackend) health(ctx context.Context, device DeviceConfig) deviceHealth {
-	if b.adb.healthy(ctx, device) {
-		return deviceHealth{healthy: true}
+	if !b.adb.healthy(ctx, device) {
+		return deviceHealth{reason: "ADB target is offline or unavailable"}
 	}
-	return deviceHealth{reason: "ADB target is offline or unavailable"}
+	// Reachable is not the same as usable. Reporting a wedged emulator healthy is worse
+	// than reporting it down: repair skips it, the pool keeps handing it out, and every
+	// consumer fails somewhere unrelated to the reason.
+	if b.adb.wedged(ctx, device) {
+		return deviceHealth{reason: "an Application Not Responding dialog owns the screen"}
+	}
+	return deviceHealth{healthy: true}
 }
 
 func (b androidBackend) repair(ctx context.Context, cfg Config, device DeviceConfig) error {

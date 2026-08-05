@@ -29,6 +29,29 @@ func (a ADB) healthy(ctx context.Context, device DeviceConfig) bool {
 	return err == nil && strings.TrimSpace(out) == "device"
 }
 
+// wedged reports whether an ANR dialog owns the screen.
+//
+// `adb get-state` keeps answering "device" long after the UI is unusable: a system_server
+// ANR stalls broadcast delivery and covers whatever is under it, so a lease handed out in
+// that state fails in ways that look like the caller's fault -- a broadcast that never
+// answers reads as a timeout, and an assertion under the dialog reads as stale UI.
+//
+// Best-effort: a device that will not answer dumpsys is not declared wedged on that basis
+// alone. `healthy` already covers unreachable.
+func (a ADB) wedged(ctx context.Context, device DeviceConfig) bool {
+	out, err := a.run(ctx, device.Serial, "shell", "dumpsys", "window")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "mCurrentFocus") {
+			continue
+		}
+		return strings.Contains(line, "Application Not Responding")
+	}
+	return false
+}
+
 func (a ADB) bootCompleted(ctx context.Context, device DeviceConfig) bool {
 	out, err := a.run(ctx, device.Serial, "shell", "getprop", "sys.boot_completed")
 	return err == nil && strings.TrimSpace(strings.ReplaceAll(out, "\r", "")) == "1"
