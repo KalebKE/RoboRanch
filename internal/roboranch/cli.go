@@ -9,12 +9,20 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
+
+// How long a signalled child gets to exit on its own before the process group
+// is SIGKILLed. Long enough for xcodebuild to tear down a test run, short
+// enough that a lease is not pinned by a wedged child.
+const childGracePeriod = 10 * time.Second
 
 type App struct {
 	runner CommandRunner
@@ -409,12 +417,69 @@ func (a *App) cmdWithLease(args []string) error {
 		"ROBORANCH_TARGET_ID="+result.Serial,
 	)
 	cmd.Env = append(cmd.Env, rt.backends.forDevice(device).environment(device)...)
-	childErr := cmd.Run()
-	releaseErr := a.releaseDevice(context.Background(), rt, device, result.Lease)
-	if childErr != nil {
-		if releaseErr != nil {
-			fmt.Fprintf(a.stderr, "roboranch: release failed; lease retained: %s\n", releaseErr)
+
+	// Own process group, so a signal can be forwarded to the child AND anything
+	// it spawned. Without this, `kill -TERM <roboranch>` killed only roboranch:
+	// the child survived orphaned and the lease was never released. Worse, the
+	// dead holder PID then made the lease look stale, so the next checkout's GC
+	// handed the device to someone else while the orphan was still driving it —
+	// exactly the double-booking the pool exists to prevent.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Release exactly once, on every exit path including a panic.
+	var releaseOnce sync.Once
+	release := func() error {
+		var err error
+		releaseOnce.Do(func() {
+			err = a.releaseDevice(context.Background(), rt, device, result.Lease)
+		})
+		return err
+	}
+	defer func() { _ = release() }()
+
+	if err := cmd.Start(); err != nil {
+		return commandError{code: exitUnavailable, err: err}
+	}
+
+	// Setpgid detaches the child from the terminal's process group, so it no
+	// longer receives ^C on its own — forwarding is now mandatory, not optional.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	var childErr error
+	var signalled syscall.Signal
+
+	select {
+	case childErr = <-done:
+	case sig := <-sigCh:
+		signalled, _ = sig.(syscall.Signal)
+		signalProcessGroup(cmd.Process.Pid, signalled)
+		select {
+		case childErr = <-done:
+		case <-time.After(childGracePeriod):
+			signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
+			childErr = <-done
 		}
+	}
+
+	releaseErr := release()
+	if releaseErr != nil {
+		fmt.Fprintf(a.stderr, "roboranch: release failed; lease retained: %s\n", releaseErr)
+	}
+
+	if signalled != 0 {
+		// Report the conventional 128+signum so a caller can tell "interrupted"
+		// from "the command genuinely failed".
+		return commandError{
+			code: 128 + int(signalled),
+			err:  fmt.Errorf("interrupted by %s; child terminated and lease released", signalled),
+		}
+	}
+	if childErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(childErr, &exitErr) {
 			return commandError{code: exitErr.ExitCode(), err: fmt.Errorf("command exited with %d", exitErr.ExitCode())}
@@ -425,6 +490,20 @@ func (a *App) cmdWithLease(args []string) error {
 		return releaseErr
 	}
 	return nil
+}
+
+// signalProcessGroup sends sig to the child's whole process group, falling back
+// to the single process if the group cannot be resolved (it already exited).
+func signalProcessGroup(pid int, sig syscall.Signal) {
+	if sig == 0 {
+		return
+	}
+	if pgid, err := syscall.Getpgid(pid); err == nil {
+		if err := syscall.Kill(-pgid, sig); err == nil {
+			return
+		}
+	}
+	_ = syscall.Kill(pid, sig)
 }
 
 func (a *App) cmdRepair(args []string) error {

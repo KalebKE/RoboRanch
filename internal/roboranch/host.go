@@ -25,7 +25,11 @@ func (h HostManager) repair(ctx context.Context, cfg Config, adb ADB, device Dev
 	if device.Type != DeviceTypeEmulator {
 		return fmt.Errorf("%s is not an emulator", device.ID)
 	}
-	if adb.healthy(ctx, device) {
+	// Reachable AND usable. Guarding on adb.healthy alone made repair disagree with the
+	// health assessment that sent work here: the CLI decided a wedged device was unhealthy,
+	// printed "restarting", and this returned nil because adb could still reach it. Three
+	// emulators sat wedged for 22 days of uptime while repair reported repaired=3.
+	if adb.healthy(ctx, device) && !adb.wedged(ctx, device) {
 		return nil
 	}
 	if err := h.restart(ctx, device); err != nil {
