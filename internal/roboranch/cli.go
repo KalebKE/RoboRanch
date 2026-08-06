@@ -780,7 +780,11 @@ func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease boo
 	serial := fs.String("serial", "", "serial")
 	ttlRaw := fs.String("ttl", defaultTTL.String(), "lease ttl")
 	waitRaw := fs.String("wait", defaultWait.String(), "wait timeout")
-	holderPID := fs.Int("holder-pid", os.Getpid(), "holder pid")
+	// Default to untracked, not os.Getpid(). This process exits as soon as it prints the lease,
+	// so defaulting to its own PID made every checkout lease stale at birth -- reapable by the
+	// next consumer's gc, which cleans the device first. `with-lease` overrides this with its own
+	// PID because it genuinely stays alive for the lease.
+	holderPID := fs.Int("holder-pid", holderPIDUntracked, "holder pid (0 = untracked; bounded by TTL alone)")
 	jsonMode := fs.Bool("json", false, "print JSON")
 	labels := repeatedFlag{}
 	fs.Var(&labels, "label", "required label")

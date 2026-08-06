@@ -130,6 +130,13 @@ func (s *LeaseStore) clearCleanup(id string) {
 	_ = os.Remove(s.cleanupPath(id))
 }
 
+// holderPIDUntracked marks a lease with no process to watch. A bare `checkout` prints a lease
+// and exits, so tying staleness to its own PID made every such lease reapable the instant it was
+// issued -- and since checkout runs gc first, the next consumer would clean and re-hand a device
+// still in use. Callers that DO stay alive for the lease (with-lease, or a supervisor pinning
+// pid 1) pass a real PID and keep the prompt-abandonment check.
+const holderPIDUntracked = 0
+
 func (s *LeaseStore) stale(id string, now time.Time) (bool, string) {
 	lease, err := s.readLease(id)
 	if err != nil {
@@ -138,7 +145,10 @@ func (s *LeaseStore) stale(id string, now time.Time) (bool, string) {
 	if lease.ExpiresAt.Before(now.UTC()) {
 		return true, "expired"
 	}
-	if lease.Hostname == s.hostname && !processAlive(lease.HolderPID) {
+	// An untracked holder is bounded by its TTL alone. That is the honest contract for a lease
+	// issued by a CLI that does not stay running, and TTL still bounds a crashed job.
+	if lease.HolderPID > holderPIDUntracked &&
+		lease.Hostname == s.hostname && !processAlive(lease.HolderPID) {
 		return true, fmt.Sprintf("pid %d dead", lease.HolderPID)
 	}
 	return false, ""
