@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type ADB struct {
@@ -50,6 +52,29 @@ func (a ADB) wedged(ctx context.Context, device DeviceConfig) bool {
 		return strings.Contains(line, "Application Not Responding")
 	}
 	return false
+}
+
+// clockSkew reports how far the device's clock sits from this host, and whether it could
+// be read at all.
+//
+// A pooled emulator is resumed rather than recreated, so it can come back with a clock
+// months behind. Nothing about it looks broken -- adb answers "device", the screen is
+// idle -- but every TLS chain fails notBefore validation, so the net stack reports
+// ERR_CERT_DATE_INVALID, Conscrypt raises "Chain validation failed", and Firebase wraps
+// that as "An internal error has occurred". The failure surfaces as an auth bug in
+// whatever happens to sign in first, on branches that touch no auth code.
+//
+// Best-effort, like wedged: a device that will not answer is not condemned on that basis.
+func (a ADB) clockSkew(ctx context.Context, device DeviceConfig) (time.Duration, bool) {
+	out, err := a.run(ctx, device.Serial, "shell", "date", "-u", "+%s")
+	if err != nil {
+		return 0, false
+	}
+	epoch, err := strconv.ParseInt(strings.TrimSpace(strings.ReplaceAll(out, "\r", "")), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return time.Since(time.Unix(epoch, 0)), true
 }
 
 func (a ADB) bootCompleted(ctx context.Context, device DeviceConfig) bool {

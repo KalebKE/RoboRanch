@@ -8,7 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// A pooled emulator resumed from a snapshot can come back months behind. Sixty seconds is
+// far wider than NTP drift and far narrower than anything that breaks certificate
+// validation, so it separates "slightly adrift" from "will fail every TLS handshake".
+const maxClockSkew = 60 * time.Second
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
 
 type deviceHealth struct {
 	healthy bool
@@ -59,6 +72,14 @@ func (b androidBackend) health(ctx context.Context, device DeviceConfig) deviceH
 	// consumer fails somewhere unrelated to the reason.
 	if b.adb.wedged(ctx, device) {
 		return deviceHealth{reason: "an Application Not Responding dialog owns the screen"}
+	}
+	// Same class of problem as wedged, different symptom: reachable, idle, and useless.
+	// A clock this far out fails every TLS chain on the device.
+	if skew, ok := b.adb.clockSkew(ctx, device); ok && absDuration(skew) > maxClockSkew {
+		return deviceHealth{reason: fmt.Sprintf(
+			"clock is %s from this host; TLS chains will fail notBefore validation",
+			absDuration(skew).Round(time.Second),
+		)}
 	}
 	return deviceHealth{healthy: true}
 }
