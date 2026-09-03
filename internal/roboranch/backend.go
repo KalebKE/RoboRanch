@@ -8,7 +8,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// A pooled emulator resumed from a snapshot can come back months behind. Sixty seconds is
+// Measured, not guessed: a snapshot-resumed emulator sits 80-130s behind until
+// Android's NTP poll corrects it (the poll interval is 18 hours), and the whole
+// healthy pool passes every TLS-touching E2E in that state. 60s would therefore
+// mark a working pool unhealthy after every launchd restart. What actually broke
+// certificate validation was a 4.5-MONTH lag on a stale snapshot. 15 minutes is
+// far above resume-lag noise and far below anything a cert's validity window
+// notices, so it separates "NTP hasn't caught up yet" from "this device will
+// fail every handshake".
+const maxClockSkew = 15 * time.Minute
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
 
 type deviceHealth struct {
 	healthy bool
@@ -59,6 +78,14 @@ func (b androidBackend) health(ctx context.Context, device DeviceConfig) deviceH
 	// consumer fails somewhere unrelated to the reason.
 	if b.adb.wedged(ctx, device) {
 		return deviceHealth{reason: "an Application Not Responding dialog owns the screen"}
+	}
+	// Same class of problem as wedged, different symptom: reachable, idle, and useless.
+	// A clock this far out fails every TLS chain on the device.
+	if skew, ok := b.adb.clockSkew(ctx, device); ok && absDuration(skew) > maxClockSkew {
+		return deviceHealth{reason: fmt.Sprintf(
+			"clock is %s from this host; TLS chains will fail notBefore validation",
+			absDuration(skew).Round(time.Second),
+		)}
 	}
 	return deviceHealth{healthy: true}
 }

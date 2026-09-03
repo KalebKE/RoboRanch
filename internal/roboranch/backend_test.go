@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type runnerFunc func(context.Context, string, ...string) (string, error)
@@ -258,7 +261,86 @@ func TestAndroidHealthRejectsAWedgedDevice(t *testing.T) {
 	}
 }
 
+func TestAndroidHealthRejectsASkewedClock(t *testing.T) {
+	// A pooled emulator is resumed, not recreated, so its clock can come back far behind
+	// the host. Every TLS chain then fails notBefore validation -- Chrome's net stack
+	// reports ERR_CERT_DATE_INVALID and Conscrypt raises "Chain validation failed" -- and
+	// Firebase wraps that as "An internal error has occurred", which reads as an app bug.
+	// Observed on ci-pool-4 sitting four months behind while adb answered "device" and
+	// the screen was idle: every E2E sign-in in the fleet failed at once, on PRs that
+	// touched no auth code.
+	tests := []struct {
+		name    string
+		skew    time.Duration
+		healthy bool
+	}{
+		{name: "in step with the host", skew: 0, healthy: true},
+		{name: "a few seconds adrift is fine", skew: 20 * time.Second, healthy: true},
+		// A snapshot-resumed emulator sits 80-130s behind until Android's NTP
+		// poll (every 18h) corrects it; the whole pool runs in this state after
+		// a launchd restart and passes every TLS-touching E2E. Must be healthy.
+		{name: "post-resume NTP lag is fine", skew: -130 * time.Second, healthy: true},
+		{name: "just under the limit is fine", skew: 14 * time.Minute, healthy: true},
+		{name: "past the limit is not", skew: -16 * time.Minute},
+		{name: "behind the host is not", skew: -4 * time.Hour},
+		{name: "ahead of the host is not either", skew: 4 * time.Hour},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deviceNow := time.Now().Add(test.skew).UTC().Unix()
+			runner := runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+				joined := strings.Join(args, " ")
+				switch {
+				case strings.Contains(joined, "get-state"):
+					return "device\n", nil
+				case strings.Contains(joined, "window"):
+					return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+				case strings.Contains(joined, "date"):
+					return fmt.Sprintf("%d\n", deviceNow), nil
+				}
+				return "", nil
+			})
+			backend := androidBackend{adb: ADB{path: "adb", runner: runner}}
+			got := backend.health(context.Background(), DeviceConfig{Serial: "emulator-5554"})
+			if got.healthy != test.healthy {
+				t.Fatalf("healthy = %v, want %v (reason %q)", got.healthy, test.healthy, got.reason)
+			}
+			if !test.healthy && !strings.Contains(strings.ToLower(got.reason), "clock") {
+				t.Fatalf("reason should name the clock, got %q", got.reason)
+			}
+		})
+	}
+}
+
+func TestAndroidHealthDoesNotFailADeviceThatWillNotReportItsClock(t *testing.T) {
+	// Best-effort, like wedged: a device that will not answer `date` is not condemned on
+	// that basis. Reachability is already covered by healthy, and failing closed here
+	// would empty the pool the first time an image drops the binary.
+	runner := runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "get-state"):
+			return "device\n", nil
+		case strings.Contains(joined, "window"):
+			return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+		case strings.Contains(joined, "date"):
+			return "", errors.New("date: not found")
+		}
+		return "", nil
+	})
+	backend := androidBackend{adb: ADB{path: "adb", runner: runner}}
+	if got := backend.health(context.Background(), DeviceConfig{Serial: "emulator-5554"}); !got.healthy {
+		t.Fatalf("healthy = false, want true (reason %q)", got.reason)
+	}
+}
+
 func TestRepairRestartsAWedgedDeviceEvenThoughAdbAnswers(t *testing.T) {
+	// repair shells out to launchctl, which the code refuses off-macOS before it
+	// ever reaches the fake runner. Pre-existing red on the ubuntu CI leg since
+	// this test landed in #4.
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd repair is macOS-only")
+	}
 	// repair guarded on adb.healthy -- raw reachability -- while the CLI decided
 	// unhealthiness from backend.health, which now also fails a wedged device. The two
 	// disagreed, so repair printed "restarting" and returned nil without doing anything.
