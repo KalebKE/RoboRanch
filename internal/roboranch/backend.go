@@ -12,9 +12,15 @@ import (
 )
 
 // A pooled emulator resumed from a snapshot can come back months behind. Sixty seconds is
-// far wider than NTP drift and far narrower than anything that breaks certificate
-// validation, so it separates "slightly adrift" from "will fail every TLS handshake".
-const maxClockSkew = 60 * time.Second
+// Measured, not guessed: a snapshot-resumed emulator sits 80-130s behind until
+// Android's NTP poll corrects it (the poll interval is 18 hours), and the whole
+// healthy pool passes every TLS-touching E2E in that state. 60s would therefore
+// mark a working pool unhealthy after every launchd restart. What actually broke
+// certificate validation was a 4.5-MONTH lag on a stale snapshot. 15 minutes is
+// far above resume-lag noise and far below anything a cert's validity window
+// notices, so it separates "NTP hasn't caught up yet" from "this device will
+// fail every handshake".
+const maxClockSkew = 15 * time.Minute
 
 func absDuration(d time.Duration) time.Duration {
 	if d < 0 {

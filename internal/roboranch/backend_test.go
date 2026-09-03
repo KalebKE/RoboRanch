@@ -275,6 +275,12 @@ func TestAndroidHealthRejectsASkewedClock(t *testing.T) {
 	}{
 		{name: "in step with the host", skew: 0, healthy: true},
 		{name: "a few seconds adrift is fine", skew: 20 * time.Second, healthy: true},
+		// A snapshot-resumed emulator sits 80-130s behind until Android's NTP
+		// poll (every 18h) corrects it; the whole pool runs in this state after
+		// a launchd restart and passes every TLS-touching E2E. Must be healthy.
+		{name: "post-resume NTP lag is fine", skew: -130 * time.Second, healthy: true},
+		{name: "just under the limit is fine", skew: 14 * time.Minute, healthy: true},
+		{name: "past the limit is not", skew: -16 * time.Minute},
 		{name: "behind the host is not", skew: -4 * time.Hour},
 		{name: "ahead of the host is not either", skew: 4 * time.Hour},
 	}
