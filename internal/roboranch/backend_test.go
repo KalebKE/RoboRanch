@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -334,6 +335,12 @@ func TestAndroidHealthDoesNotFailADeviceThatWillNotReportItsClock(t *testing.T) 
 }
 
 func TestRepairRestartsAWedgedDeviceEvenThoughAdbAnswers(t *testing.T) {
+	// repair shells out to launchctl, which the code refuses off-macOS before it
+	// ever reaches the fake runner. Pre-existing red on the ubuntu CI leg since
+	// this test landed in #4.
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd repair is macOS-only")
+	}
 	// repair guarded on adb.healthy -- raw reachability -- while the CLI decided
 	// unhealthiness from backend.health, which now also fails a wedged device. The two
 	// disagreed, so repair printed "restarting" and returned nil without doing anything.
