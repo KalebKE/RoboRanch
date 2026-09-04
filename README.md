@@ -14,7 +14,7 @@ It is smaller than Appium Grid, Selenium Grid, or a device cloud. Those tools ro
 | --- | --- | --- | --- |
 | Android emulator | `emulator` | `adb`, Android Emulator | Repairs unhealthy AVDs and removes third-party apps on release by default |
 | Android device | `device` | `adb` | Health-checks attached hardware; cleanup is opt-in |
-| iOS simulator | `simulator` | macOS, Xcode, `simctl` | Boots shutdown simulators, then erases and warm-boots them on release |
+| iOS simulator | `simulator` | macOS, Xcode, `simctl` | Boots shutdown simulators; release can reset, shut down, or preserve them |
 | Physical iPhone | `device` | macOS, Xcode, `devicectl` | Requires a paired, connected, unlocked Developer Mode device; never mutates it |
 
 iOS support is macOS-only. Existing configurations remain Android-compatible because a missing `platform` field means `android`, and checkout defaults to `--platform android`.
@@ -176,6 +176,9 @@ A complete sanitized example is in [examples/pool.example.json](examples/pool.ex
   "androidSdk": "",
   "defaultTTL": "30m",
   "repairTimeout": "2m",
+  "limits": {
+    "iosSimulators": {"maxBooted": 1}
+  },
   "devices": [
     {
       "id": "api36-1",
@@ -195,7 +198,8 @@ A complete sanitized example is in [examples/pool.example.json](examples/pool.ex
       "platform": "ios",
       "type": "simulator",
       "serial": "REPLACE_WITH_SIMULATOR_UDID",
-      "labels": ["simulator", "ios26", "iphone"]
+      "labels": ["simulator", "ios26", "iphone"],
+      "cleanup": {"mode": "shutdown"}
     }
   ]
 }
@@ -207,12 +211,13 @@ The important fields are:
 - `androidSdk`: optional SDK path. Leave empty to use environment/default discovery.
 - `defaultTTL`: default lease lifetime. Expired leases are reaped by `gc` and before checkout.
 - `repairTimeout`: how long virtual-target repair and cleanup wait for boot.
+- `limits.iosSimulators.maxBooted`: optional host-wide iOS simulator limit. Every booted iOS simulator counts, including targets started outside RoboRanch. A checkout waits rather than terminating an existing session.
 - `devices[].id`: stable RoboRanch id used for leases.
 - `devices[].platform`: `android` or `ios`; omitted means `android` for compatibility.
 - `devices[].type`: `emulator`, `simulator`, or `device`, as appropriate for the platform.
 - `devices[].serial`: ADB serial for Android or UDID for iOS.
 - `devices[].labels`: selectors used by jobs, such as `api36`, `x86_64`, `pixel`, or `physical`.
-- `devices[].cleanup.enabled`: virtual-target cleanup is enabled by default; physical-device cleanup is disabled. Physical iPhone cleanup cannot be enabled.
+- `devices[].cleanup.mode`: `reset`, `shutdown`, or `none`. The legacy `cleanup.enabled` boolean remains supported as `reset`/`none`. A boot limit requires `shutdown` for every configured iOS simulator, and physical iPhones only support `none`.
 - `devices[].launchdLabel`: macOS service name used by `repair`.
 - `devices[].systemdUnit`: Linux user service name used by `repair`.
 

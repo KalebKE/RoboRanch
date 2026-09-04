@@ -2,9 +2,11 @@ package roboranch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -147,6 +149,152 @@ func TestCheckoutRotatesTowardLeastRecentlyUsedDevice(t *testing.T) {
 	}
 }
 
+func TestIOSBootCapacitySerializesLeasesAndShutdownFreesSlot(t *testing.T) {
+	runner := newSimulatorRunner(map[string]string{"SIM-1": "Shutdown", "SIM-2": "Shutdown"})
+	app, rt := capacityTestApp(t, runner)
+	options := checkoutOptions{
+		platform: PlatformIOS, deviceType: DeviceTypeSimulator, ttl: time.Minute, holderPID: os.Getpid(),
+	}
+
+	first, code, err := app.checkout(context.Background(), rt, options)
+	if err != nil || code != exitOK {
+		t.Fatalf("first checkout failed: code=%d err=%v", code, err)
+	}
+	if runner.bootedCount() != 1 {
+		t.Fatalf("expected one booted simulator, got %d", runner.bootedCount())
+	}
+
+	if _, code, err = app.checkout(context.Background(), rt, options); err == nil || code != exitUnavailable {
+		t.Fatalf("second checkout should be capacity-blocked: code=%d err=%v", code, err)
+	}
+	if runner.bootedCount() != 1 {
+		t.Fatalf("capacity-blocked checkout booted another simulator: %d", runner.bootedCount())
+	}
+
+	firstDevice, _ := findDevice(rt.config.Devices, first.ID)
+	if err := app.releaseDevice(context.Background(), rt, firstDevice, first.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if runner.bootedCount() != 0 {
+		t.Fatalf("release left a simulator booted: %d", runner.bootedCount())
+	}
+
+	second, code, err := app.checkout(context.Background(), rt, options)
+	if err != nil || code != exitOK {
+		t.Fatalf("checkout after release failed: code=%d err=%v", code, err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("expected least-recently-used rotation, got %s twice", first.ID)
+	}
+	secondDevice, _ := findDevice(rt.config.Devices, second.ID)
+	if err := app.releaseDevice(context.Background(), rt, secondDevice, second.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if runner.bootedCount() != 0 {
+		t.Fatalf("final release left a simulator booted: %d", runner.bootedCount())
+	}
+}
+
+func TestIOSBootCapacityCountsManualSimulatorWithoutStoppingIt(t *testing.T) {
+	runner := newSimulatorRunner(map[string]string{
+		"SIM-1": "Shutdown", "SIM-2": "Shutdown", "MANUAL": "Booted",
+	})
+	app, rt := capacityTestApp(t, runner)
+	options := checkoutOptions{
+		platform: PlatformIOS, deviceType: DeviceTypeSimulator, ttl: time.Minute, holderPID: os.Getpid(),
+	}
+
+	if _, code, err := app.checkout(context.Background(), rt, options); err == nil || code != exitUnavailable {
+		t.Fatalf("manual simulator should occupy capacity: code=%d err=%v", code, err)
+	}
+	if runner.state("MANUAL") != "Booted" {
+		t.Fatal("capacity enforcement shut down the manual simulator")
+	}
+	if runner.called("simctl bootstatus") {
+		t.Fatalf("capacity enforcement attempted another boot: %v", runner.callList())
+	}
+}
+
+func TestIOSBootCapacityLockPreventsConcurrentBootRace(t *testing.T) {
+	runner := newSimulatorRunner(map[string]string{"SIM-1": "Shutdown", "SIM-2": "Shutdown"})
+	runner.bootStarted = make(chan struct{})
+	runner.allowBoot = make(chan struct{})
+	app, rt := capacityTestApp(t, runner)
+	options := checkoutOptions{
+		platform: PlatformIOS, deviceType: DeviceTypeSimulator, ttl: time.Minute, holderPID: os.Getpid(),
+	}
+	type checkoutOutcome struct {
+		result CheckoutResult
+		code   int
+		err    error
+	}
+	firstDone := make(chan checkoutOutcome, 1)
+	go func() {
+		result, code, err := app.checkout(context.Background(), rt, options)
+		firstDone <- checkoutOutcome{result: result, code: code, err: err}
+	}()
+	<-runner.bootStarted
+
+	if _, code, err := app.checkout(context.Background(), rt, options); err == nil || code != exitUnavailable {
+		t.Fatalf("concurrent checkout should wait on capacity lock: code=%d err=%v", code, err)
+	}
+	close(runner.allowBoot)
+	first := <-firstDone
+	if first.err != nil || first.code != exitOK {
+		t.Fatalf("first checkout failed: code=%d err=%v", first.code, first.err)
+	}
+	if runner.bootedCount() != 1 {
+		t.Fatalf("concurrent checkout race booted %d simulators", runner.bootedCount())
+	}
+	device, _ := findDevice(rt.config.Devices, first.result.ID)
+	if err := app.releaseDevice(context.Background(), rt, device, first.result.Lease); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIOSStaleLeaseGCShutsDownBeforeUnlocking(t *testing.T) {
+	runner := newSimulatorRunner(map[string]string{"SIM-1": "Booted", "SIM-2": "Shutdown"})
+	app, rt := capacityTestApp(t, runner)
+	device, _ := findDevice(rt.config.Devices, "sim-1")
+	if _, ok, err := rt.store.acquire(device, 999999, -time.Minute); err != nil || !ok {
+		t.Fatalf("create stale lease: ok=%v err=%v", ok, err)
+	}
+
+	reaped, retained := app.gc(context.Background(), rt, nil)
+	if reaped != 1 || retained != 0 {
+		t.Fatalf("unexpected gc result: reaped=%d retained=%d", reaped, retained)
+	}
+	if rt.store.locked(device.ID) {
+		t.Fatal("gc retained a successfully cleaned lease")
+	}
+	if runner.state(device.Serial) != "Shutdown" {
+		t.Fatal("gc unlocked the lease without shutting down the simulator")
+	}
+}
+
+func capacityTestApp(t *testing.T, runner CommandRunner) (*App, *runtimeState) {
+	t.Helper()
+	maxBooted := 1
+	shutdown := &CleanupConfig{Mode: string(CleanupShutdown)}
+	cfg := Config{
+		Version: 1,
+		Limits:  LimitsConfig{IOSSimulators: IOSSimulatorLimits{MaxBooted: &maxBooted}},
+		Devices: []DeviceConfig{
+			{ID: "sim-1", Platform: PlatformIOS, Type: DeviceTypeSimulator, Serial: "SIM-1", Cleanup: shutdown},
+			{ID: "sim-2", Platform: PlatformIOS, Type: DeviceTypeSimulator, Serial: "SIM-2", Cleanup: shutdown},
+		},
+	}
+	if err := cfg.applyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newLeaseStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{runner: runner, stdout: ioDiscard{}, stderr: ioDiscard{}}
+	return app, &runtimeState{config: cfg, store: store, backends: newBackendRegistry(cfg, runner)}
+}
+
 func TestCleanupUninstallsThirdPartyPackagesWithoutTrimCaches(t *testing.T) {
 	runner := &fakeRunner{
 		states:   map[string]string{"emulator-5554": "device"},
@@ -280,6 +428,91 @@ type fakeRunner struct {
 	packages map[string][]string
 	fail     map[string]error
 	calls    []string
+}
+
+type simulatorRunner struct {
+	mu          sync.Mutex
+	states      map[string]string
+	calls       []string
+	bootStarted chan struct{}
+	allowBoot   chan struct{}
+	startOnce   sync.Once
+}
+
+func newSimulatorRunner(states map[string]string) *simulatorRunner {
+	return &simulatorRunner{states: states}
+}
+
+func (f *simulatorRunner) Run(_ context.Context, name string, args ...string) (string, error) {
+	call := name + " " + strings.Join(args, " ")
+	f.mu.Lock()
+	f.calls = append(f.calls, call)
+	f.mu.Unlock()
+	joined := strings.Join(args, " ")
+	if name == "xcrun" && joined == "simctl list devices --json" {
+		f.mu.Lock()
+		devices := make([]simctlDevice, 0, len(f.states))
+		for udid, state := range f.states {
+			devices = append(devices, simctlDevice{Name: udid, UDID: udid, State: state, IsAvailable: true})
+		}
+		f.mu.Unlock()
+		data, err := json.Marshal(simctlDeviceList{Devices: map[string][]simctlDevice{
+			"com.apple.CoreSimulator.SimRuntime.iOS-26-4": devices,
+		}})
+		return string(data), err
+	}
+	if name == "xcrun" && len(args) >= 4 && args[0] == "simctl" && args[1] == "bootstatus" {
+		if f.bootStarted != nil {
+			f.startOnce.Do(func() { close(f.bootStarted) })
+			<-f.allowBoot
+		}
+		f.mu.Lock()
+		f.states[args[2]] = "Booted"
+		f.mu.Unlock()
+		return "", nil
+	}
+	if name == "xcrun" && len(args) == 3 && args[0] == "simctl" && args[1] == "shutdown" {
+		f.mu.Lock()
+		f.states[args[2]] = "Shutdown"
+		f.mu.Unlock()
+		return "", nil
+	}
+	return "", nil
+}
+
+func (f *simulatorRunner) bootedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, state := range f.states {
+		if state == "Booted" {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *simulatorRunner) state(udid string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.states[udid]
+}
+
+func (f *simulatorRunner) called(fragment string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, call := range f.calls {
+		if strings.Contains(call, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *simulatorRunner) callList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
 
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) (string, error) {

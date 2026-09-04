@@ -87,6 +87,9 @@ func (c *Config) applyDefaultsAndValidate() error {
 	} else if repairTimeout <= 0 {
 		return fmt.Errorf("repairTimeout must be greater than zero")
 	}
+	if c.Limits.IOSSimulators.MaxBooted != nil && *c.Limits.IOSSimulators.MaxBooted <= 0 {
+		return errors.New("limits.iosSimulators.maxBooted must be greater than zero when configured")
+	}
 	if len(c.Devices) == 0 {
 		return errors.New("config must define at least one device")
 	}
@@ -108,6 +111,20 @@ func (c *Config) applyDefaultsAndValidate() error {
 		if device.Serial == "" {
 			return fmt.Errorf("device %q serial is required", device.ID)
 		}
+		if device.Cleanup != nil {
+			if device.Cleanup.Enabled != nil && device.Cleanup.Mode != "" {
+				return fmt.Errorf("device %q cleanup cannot specify both enabled and mode", device.ID)
+			}
+			switch mode := device.cleanupMode(); mode {
+			case CleanupNone, CleanupReset:
+			case CleanupShutdown:
+				if device.Platform != PlatformIOS || device.Type != DeviceTypeSimulator {
+					return fmt.Errorf("device %q cleanup mode shutdown is only supported for iOS simulators", device.ID)
+				}
+			default:
+				return fmt.Errorf("device %q cleanup mode must be none, reset, or shutdown", device.ID)
+			}
+		}
 		switch device.Platform {
 		case PlatformAndroid:
 			switch device.Type {
@@ -123,6 +140,9 @@ func (c *Config) applyDefaultsAndValidate() error {
 			}
 			if device.Type == DeviceTypePhysical && device.cleanupEnabled() {
 				return fmt.Errorf("device %q cannot enable cleanup for a physical iOS device", device.ID)
+			}
+			if device.Type == DeviceTypeSimulator && c.Limits.IOSSimulators.MaxBooted != nil && device.cleanupMode() != CleanupShutdown {
+				return fmt.Errorf("device %q must use cleanup mode shutdown when limits.iosSimulators.maxBooted is configured", device.ID)
 			}
 			if device.SystemdUnit != "" || device.LaunchdLabel != "" || device.AVD != "" || device.Port != 0 || device.Snapshot != "" || len(device.EmulatorFlags) > 0 {
 				return fmt.Errorf("device %q uses Android emulator fields with platform ios", device.ID)
@@ -185,6 +205,13 @@ func (c Config) defaultTTLDuration() time.Duration {
 func (c Config) repairTimeoutDuration() time.Duration {
 	d, _ := parseDuration(c.RepairTimeout, defaultRepairTimeout)
 	return d
+}
+
+func (c Config) iosSimulatorMaxBooted() int {
+	if c.Limits.IOSSimulators.MaxBooted == nil {
+		return 0
+	}
+	return *c.Limits.IOSSimulators.MaxBooted
 }
 
 func deviceBootTimeout(c Config, d DeviceConfig) time.Duration {

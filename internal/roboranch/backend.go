@@ -129,13 +129,9 @@ func (b iosBackend) health(ctx context.Context, device DeviceConfig) deviceHealt
 }
 
 func (b iosBackend) simulatorHealth(ctx context.Context, device DeviceConfig) deviceHealth {
-	out, err := b.runner.Run(ctx, "xcrun", "simctl", "list", "devices", "--json")
+	listing, err := b.simulatorList(ctx)
 	if err != nil {
-		return deviceHealth{reason: fmt.Sprintf("simctl list failed: %s", err)}
-	}
-	var listing simctlDeviceList
-	if err := json.Unmarshal([]byte(out), &listing); err != nil {
-		return deviceHealth{reason: fmt.Sprintf("invalid simctl JSON: %s", err)}
+		return deviceHealth{reason: err.Error()}
 	}
 	for _, runtimeDevices := range listing.Devices {
 		for _, candidate := range runtimeDevices {
@@ -154,6 +150,37 @@ func (b iosBackend) simulatorHealth(ctx context.Context, device DeviceConfig) de
 	return deviceHealth{reason: "simulator UDID was not found"}
 }
 
+func (b iosBackend) simulatorList(ctx context.Context) (simctlDeviceList, error) {
+	out, err := b.runner.Run(ctx, "xcrun", "simctl", "list", "devices", "--json")
+	if err != nil {
+		return simctlDeviceList{}, fmt.Errorf("simctl list failed: %w", err)
+	}
+	var listing simctlDeviceList
+	if err := json.Unmarshal([]byte(out), &listing); err != nil {
+		return simctlDeviceList{}, fmt.Errorf("invalid simctl JSON: %w", err)
+	}
+	return listing, nil
+}
+
+func (b iosBackend) bootedSimulators(ctx context.Context) ([]simctlDevice, error) {
+	listing, err := b.simulatorList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var booted []simctlDevice
+	for runtimeID, devices := range listing.Devices {
+		if !strings.Contains(runtimeID, ".iOS-") {
+			continue
+		}
+		for _, device := range devices {
+			if device.IsAvailable && device.State == "Booted" {
+				booted = append(booted, device)
+			}
+		}
+	}
+	return booted, nil
+}
+
 func (b iosBackend) repair(ctx context.Context, cfg Config, device DeviceConfig) error {
 	if device.Type != DeviceTypeSimulator {
 		return fmt.Errorf("%s is not a simulator", device.ID)
@@ -167,7 +194,8 @@ func (b iosBackend) repair(ctx context.Context, cfg Config, device DeviceConfig)
 }
 
 func (b iosBackend) cleanup(ctx context.Context, cfg Config, device DeviceConfig, stderr io.Writer) error {
-	if !device.cleanupEnabled() {
+	mode := device.cleanupMode()
+	if mode == CleanupNone {
 		return nil
 	}
 	if device.Type != DeviceTypeSimulator {
@@ -176,7 +204,13 @@ func (b iosBackend) cleanup(ctx context.Context, cfg Config, device DeviceConfig
 	cleanupCtx, cancel := context.WithTimeout(ctx, deviceBootTimeout(cfg, device))
 	defer cancel()
 	fmt.Fprintf(stderr, "roboranch: cleaning up %s (%s)\n", device.ID, device.Serial)
-	_, _ = b.runner.Run(cleanupCtx, "xcrun", "simctl", "shutdown", device.Serial)
+	if err := b.shutdownSimulator(cleanupCtx, device); err != nil {
+		return err
+	}
+	if mode == CleanupShutdown {
+		fmt.Fprintf(stderr, "roboranch: cleanup done for %s (shutdown)\n", device.ID)
+		return nil
+	}
 	if _, err := b.runner.Run(cleanupCtx, "xcrun", "simctl", "erase", device.Serial); err != nil {
 		return fmt.Errorf("erase simulator %s: %w", device.ID, err)
 	}
@@ -185,6 +219,16 @@ func (b iosBackend) cleanup(ctx context.Context, cfg Config, device DeviceConfig
 	}
 	fmt.Fprintf(stderr, "roboranch: cleanup done for %s\n", device.ID)
 	return nil
+}
+
+func (b iosBackend) shutdownSimulator(ctx context.Context, device DeviceConfig) error {
+	if _, err := b.runner.Run(ctx, "xcrun", "simctl", "shutdown", device.Serial); err == nil {
+		return nil
+	} else if health := b.simulatorHealth(ctx, device); health.reason == "simulator is shutdown" {
+		return nil
+	} else {
+		return fmt.Errorf("shutdown simulator %s: %w", device.ID, err)
+	}
 }
 
 func (b iosBackend) repairable(device DeviceConfig) bool {

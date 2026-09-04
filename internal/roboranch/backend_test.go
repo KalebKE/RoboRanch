@@ -82,6 +82,104 @@ func TestIOSSimulatorCleanupErasesAndWarmBoots(t *testing.T) {
 	}
 }
 
+func TestIOSSimulatorShutdownCleanupDoesNotEraseOrReboot(t *testing.T) {
+	var calls []string
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return "", nil
+	})}
+	device := DeviceConfig{
+		ID:       "sim",
+		Platform: PlatformIOS,
+		Type:     DeviceTypeSimulator,
+		Serial:   "SIM-1",
+		Cleanup:  &CleanupConfig{Mode: string(CleanupShutdown)},
+	}
+	if err := backend.cleanup(context.Background(), Config{}, device, ioDiscard{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "xcrun simctl shutdown SIM-1"
+	if strings.Join(calls, "\n") != want {
+		t.Fatalf("shutdown cleanup must not erase or reboot; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestIOSSimulatorShutdownCleanupAcceptsAlreadyShutdown(t *testing.T) {
+	listing, err := json.Marshal(simctlDeviceList{Devices: map[string][]simctlDevice{
+		"com.apple.CoreSimulator.SimRuntime.iOS-26-4": {{UDID: "SIM-1", State: "Shutdown", IsAvailable: true}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		if strings.Join(args, " ") == "simctl shutdown SIM-1" {
+			return "", errors.New("already shutdown")
+		}
+		return string(listing), nil
+	})}
+	device := DeviceConfig{
+		ID:       "sim",
+		Platform: PlatformIOS,
+		Type:     DeviceTypeSimulator,
+		Serial:   "SIM-1",
+		Cleanup:  &CleanupConfig{Mode: string(CleanupShutdown)},
+	}
+	if err := backend.cleanup(context.Background(), Config{}, device, ioDiscard{}); err != nil {
+		t.Fatalf("already-shutdown cleanup failed: %v", err)
+	}
+}
+
+func TestIOSSimulatorShutdownCleanupReportsFailureWhileStillBooted(t *testing.T) {
+	listing, err := json.Marshal(simctlDeviceList{Devices: map[string][]simctlDevice{
+		"com.apple.CoreSimulator.SimRuntime.iOS-26-4": {{UDID: "SIM-1", State: "Booted", IsAvailable: true}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+		if strings.Join(args, " ") == "simctl shutdown SIM-1" {
+			return "", errors.New("shutdown failed")
+		}
+		return string(listing), nil
+	})}
+	device := DeviceConfig{
+		ID:       "sim",
+		Platform: PlatformIOS,
+		Type:     DeviceTypeSimulator,
+		Serial:   "SIM-1",
+		Cleanup:  &CleanupConfig{Mode: string(CleanupShutdown)},
+	}
+	err = backend.cleanup(context.Background(), Config{}, device, ioDiscard{})
+	if err == nil || !strings.Contains(err.Error(), "shutdown simulator sim") {
+		t.Fatalf("expected shutdown failure, got %v", err)
+	}
+}
+
+func TestBootedSimulatorsCountsOnlyIOS(t *testing.T) {
+	listing, err := json.Marshal(simctlDeviceList{Devices: map[string][]simctlDevice{
+		"com.apple.CoreSimulator.SimRuntime.iOS-26-4": {
+			{Name: "iPhone", UDID: "IOS-BOOTED", State: "Booted", IsAvailable: true},
+			{Name: "iPhone", UDID: "IOS-DOWN", State: "Shutdown", IsAvailable: true},
+		},
+		"com.apple.CoreSimulator.SimRuntime.watchOS-26-4": {
+			{Name: "Watch", UDID: "WATCH-BOOTED", State: "Booted", IsAvailable: true},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, _ string, _ ...string) (string, error) {
+		return string(listing), nil
+	})}
+	booted, err := backend.bootedSimulators(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(booted) != 1 || booted[0].UDID != "IOS-BOOTED" {
+		t.Fatalf("unexpected booted iOS simulators: %#v", booted)
+	}
+}
+
 func TestIOSSimulatorCleanupStopsAfterEraseFailure(t *testing.T) {
 	var calls []string
 	backend := iosBackend{runner: runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {

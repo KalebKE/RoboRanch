@@ -36,7 +36,7 @@ Repeat for each desired slot, then capture the UDIDs:
 xcrun simctl list devices available
 ```
 
-RoboRanch boots a shutdown simulator during checkout. On release it shuts the simulator down, erases all contents and settings, boots it, waits for readiness, and only then unlocks the slot.
+RoboRanch boots a shutdown simulator during checkout. For a shared runner, use shutdown cleanup and a host-wide boot limit: release powers off the leased simulator without erasing its data, and another checkout cannot boot a second simulator while the slot is occupied.
 
 ## 3. Configure the Simulators
 
@@ -48,17 +48,23 @@ Add the fixed UDIDs to `~/.config/roboranch/pool.json`:
   "stateDir": "~/.local/share/roboranch",
   "defaultTTL": "30m",
   "repairTimeout": "2m",
+  "limits": {
+    "iosSimulators": {"maxBooted": 1}
+  },
   "devices": [
     {
       "id": "ios-sim-1",
       "platform": "ios",
       "type": "simulator",
       "serial": "REPLACE_WITH_SIMULATOR_UDID",
-      "labels": ["simulator", "ios26", "iphone", "pool-1"]
+      "labels": ["simulator", "ios26", "iphone", "pool-1"],
+      "cleanup": {"mode": "shutdown"}
     }
   ]
 }
 ```
+
+The limit counts every booted iOS simulator returned by `simctl`, including a manual developer session. RoboRanch waits for that session to end; it never shuts down a simulator it does not lease. Omit `limits.iosSimulators.maxBooted` for legacy unlimited behavior. Use `cleanup.mode: "reset"` only when erase-and-warm-boot isolation is required and no boot limit is configured.
 
 Check the host and pool:
 
