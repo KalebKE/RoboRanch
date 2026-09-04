@@ -38,8 +38,17 @@ type Config struct {
 	AndroidSDK    string                   `json:"androidSdk,omitempty"`
 	DefaultTTL    string                   `json:"defaultTTL,omitempty"`
 	RepairTimeout string                   `json:"repairTimeout,omitempty"`
+	Limits        LimitsConfig             `json:"limits,omitempty"`
 	Backends      map[string]BackendConfig `json:"backends,omitempty"`
 	Devices       []DeviceConfig           `json:"devices"`
+}
+
+type LimitsConfig struct {
+	IOSSimulators IOSSimulatorLimits `json:"iosSimulators,omitempty"`
+}
+
+type IOSSimulatorLimits struct {
+	MaxBooted *int `json:"maxBooted,omitempty"`
 }
 
 type BackendConfig struct {
@@ -66,14 +75,36 @@ type DeviceConfig struct {
 }
 
 type CleanupConfig struct {
-	Enabled *bool `json:"enabled,omitempty"`
+	Enabled *bool  `json:"enabled,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+}
+
+type CleanupMode string
+
+const (
+	CleanupNone     CleanupMode = "none"
+	CleanupReset    CleanupMode = "reset"
+	CleanupShutdown CleanupMode = "shutdown"
+)
+
+func (d DeviceConfig) cleanupMode() CleanupMode {
+	if d.Cleanup != nil && d.Cleanup.Mode != "" {
+		return CleanupMode(d.Cleanup.Mode)
+	}
+	if d.Cleanup != nil && d.Cleanup.Enabled != nil {
+		if *d.Cleanup.Enabled {
+			return CleanupReset
+		}
+		return CleanupNone
+	}
+	if d.Type == DeviceTypeEmulator || d.Type == DeviceTypeSimulator {
+		return CleanupReset
+	}
+	return CleanupNone
 }
 
 func (d DeviceConfig) cleanupEnabled() bool {
-	if d.Cleanup != nil && d.Cleanup.Enabled != nil {
-		return *d.Cleanup.Enabled
-	}
-	return d.Type == DeviceTypeEmulator || d.Type == DeviceTypeSimulator
+	return d.cleanupMode() != CleanupNone
 }
 
 type Lease struct {

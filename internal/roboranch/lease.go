@@ -62,6 +62,10 @@ func (s *LeaseStore) cleanupPath(id string) string {
 	return filepath.Join(s.locksDir, id+".cleanup")
 }
 
+func (s *LeaseStore) operationPath(name string) string {
+	return filepath.Join(s.locksDir, "."+name+".operation")
+}
+
 func (s *LeaseStore) usedPath(id string) string {
 	return filepath.Join(s.usedDir, id+".used")
 }
@@ -107,7 +111,14 @@ func (s *LeaseStore) createLock(path string, holderPID int) (bool, error) {
 }
 
 func (s *LeaseStore) claimCleanup(id string, holderPID int) (bool, error) {
-	path := s.cleanupPath(id)
+	return s.claimTransientLock(s.cleanupPath(id), holderPID)
+}
+
+func (s *LeaseStore) claimOperation(name string, holderPID int) (bool, error) {
+	return s.claimTransientLock(s.operationPath(name), holderPID)
+}
+
+func (s *LeaseStore) claimTransientLock(path string, holderPID int) (bool, error) {
 	ok, err := s.createLock(path, holderPID)
 	if err != nil || ok {
 		return ok, err
@@ -128,6 +139,10 @@ func (s *LeaseStore) claimCleanup(id string, holderPID int) (bool, error) {
 
 func (s *LeaseStore) clearCleanup(id string) {
 	_ = os.Remove(s.cleanupPath(id))
+}
+
+func (s *LeaseStore) clearOperation(name string) {
+	_ = os.Remove(s.operationPath(name))
 }
 
 func (s *LeaseStore) stale(id string, now time.Time) (bool, string) {

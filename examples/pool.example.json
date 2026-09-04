@@ -4,6 +4,9 @@
   "androidSdk": "",
   "defaultTTL": "30m",
   "repairTimeout": "2m",
+  "limits": {
+    "iosSimulators": {"maxBooted": 1}
+  },
   "devices": [
     {
       "id": "ranch-hand-1",
@@ -37,7 +40,8 @@
       "type": "simulator",
       "serial": "REPLACE_WITH_SIMULATOR_UDID",
       "labels": ["simulator", "ios", "iphone", "pool-1"],
-      "notes": "Pre-created simulator erased and warm-booted after every lease"
+      "cleanup": {"mode": "shutdown"},
+      "notes": "Pre-created simulator shut down after every lease"
     },
     {
       "id": "iphone-1",

@@ -242,6 +242,18 @@ func (a *App) cmdDoctor(args []string) error {
 		} else {
 			if out, err := a.runner.Run(context.Background(), "xcrun", "--find", "simctl"); err == nil {
 				fmt.Fprintf(a.stdout, "simctl: %s\n", strings.TrimSpace(out))
+				if maxBooted := cfg.iosSimulatorMaxBooted(); maxBooted > 0 {
+					backend := iosBackend{runner: a.runner}
+					if booted, listErr := backend.bootedSimulators(context.Background()); listErr == nil {
+						fmt.Fprintf(a.stdout, "ios simulator capacity: %d booted / %d max\n", len(booted), maxBooted)
+						for _, device := range booted {
+							fmt.Fprintf(a.stdout, "  booted: %s (%s)\n", device.Name, device.UDID)
+						}
+					} else {
+						fmt.Fprintf(a.stdout, "ios simulator capacity: unavailable (%s)\n", listErr)
+						failed = true
+					}
+				}
 			} else {
 				fmt.Fprintf(a.stdout, "simctl: missing (%s)\n", err)
 				failed = true
@@ -683,6 +695,38 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 		return CheckoutResult{}, exitUsage, fmt.Errorf("no device matches selectors")
 	}
 	rt.store.orderByLastUsed(candidates)
+	capacityLocked := false
+	capacityBlocked := false
+	maxBooted := rt.config.iosSimulatorMaxBooted()
+	if maxBooted > 0 && hasIOSSimulator(candidates) {
+		claimed, err := rt.store.claimOperation("ios-simulator-capacity", os.Getpid())
+		if err != nil {
+			return CheckoutResult{}, exitUnavailable, err
+		}
+		if !claimed {
+			capacityBlocked = true
+			candidates = withoutIOSSimulators(candidates)
+		} else {
+			capacityLocked = true
+			defer rt.store.clearOperation("ios-simulator-capacity")
+			booted, err := rt.backends.ios.bootedSimulators(ctx)
+			if err != nil {
+				return CheckoutResult{}, exitUnhealthy, err
+			}
+			if len(booted) >= maxBooted {
+				capacityBlocked = true
+				candidates = withoutIOSSimulators(candidates)
+				fmt.Fprintf(a.stderr, "roboranch: iOS simulator capacity reached: %d booted / %d max (%s)\n",
+					len(booted), maxBooted, formatSimulators(booted))
+			}
+		}
+	}
+	if len(candidates) == 0 && capacityBlocked {
+		if capacityLocked {
+			return CheckoutResult{}, exitUnavailable, fmt.Errorf("iOS simulator boot capacity is occupied")
+		}
+		return CheckoutResult{}, exitUnavailable, fmt.Errorf("iOS simulator capacity check is already in progress")
+	}
 	hadHealthy := false
 	hadLocked := false
 	for _, device := range candidates {
@@ -695,11 +739,32 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 		health := backend.health(ctx, device)
 		if !health.healthy {
 			if backend.repairable(device) {
+				lease, ok, err := rt.store.acquire(device, options.holderPID, options.ttl)
+				if err != nil {
+					return CheckoutResult{}, exitUnavailable, err
+				}
+				if !ok {
+					hadLocked = true
+					fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
+					continue
+				}
 				fmt.Fprintf(a.stderr, "roboranch: repair: %s unhealthy; attempting restart\n", device.ID)
 				if err := backend.repair(ctx, rt.config, device); err != nil {
+					if device.Platform == PlatformIOS && device.Type == DeviceTypeSimulator {
+						if shutdownErr := rt.backends.ios.shutdownSimulator(ctx, device); shutdownErr != nil {
+							return CheckoutResult{}, exitUnhealthy, fmt.Errorf(
+								"repair failed for %s (%v), then shutdown failed; lease retained: %w",
+								device.ID, err, shutdownErr)
+						}
+					}
+					if releaseErr := rt.store.forceRelease(device.ID); releaseErr != nil {
+						return CheckoutResult{}, exitUnavailable, fmt.Errorf("repair failed for %s and lease rollback failed: %w", device.ID, releaseErr)
+					}
 					fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, err)
 					continue
 				}
+				hadHealthy = true
+				return checkoutResult(lease), exitOK, nil
 			} else {
 				fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, health.reason)
 				continue
@@ -715,14 +780,7 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 			fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
 			continue
 		}
-		return CheckoutResult{
-			Lease:     lease.LeaseID,
-			ID:        lease.ID,
-			Platform:  device.Platform,
-			Serial:    lease.Serial,
-			Type:      lease.Type,
-			ExpiresAt: lease.ExpiresAt,
-		}, exitOK, nil
+		return checkoutResult(lease), exitOK, nil
 	}
 	if !hadHealthy {
 		return CheckoutResult{}, exitUnhealthy, fmt.Errorf("no healthy device available")
@@ -731,6 +789,44 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 		return CheckoutResult{}, exitUnavailable, fmt.Errorf("no device available; all matching healthy devices are locked")
 	}
 	return CheckoutResult{}, exitUnavailable, fmt.Errorf("no device available")
+}
+
+func checkoutResult(lease *Lease) CheckoutResult {
+	return CheckoutResult{
+		Lease:     lease.LeaseID,
+		ID:        lease.ID,
+		Platform:  lease.Platform,
+		Serial:    lease.Serial,
+		Type:      lease.Type,
+		ExpiresAt: lease.ExpiresAt,
+	}
+}
+
+func hasIOSSimulator(devices []DeviceConfig) bool {
+	for _, device := range devices {
+		if device.Platform == PlatformIOS && device.Type == DeviceTypeSimulator {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutIOSSimulators(devices []DeviceConfig) []DeviceConfig {
+	filtered := devices[:0]
+	for _, device := range devices {
+		if device.Platform != PlatformIOS || device.Type != DeviceTypeSimulator {
+			filtered = append(filtered, device)
+		}
+	}
+	return filtered
+}
+
+func formatSimulators(devices []simctlDevice) string {
+	formatted := make([]string, 0, len(devices))
+	for _, device := range devices {
+		formatted = append(formatted, fmt.Sprintf("%s %s", device.Name, device.UDID))
+	}
+	return strings.Join(formatted, ", ")
 }
 
 func (a *App) statuses(ctx context.Context, rt *runtimeState) []DeviceStatus {
