@@ -144,7 +144,7 @@ Commands:
   init [--force]                         Write an example config
   doctor                                 Check config, state, and platform tools
   list [--json]                          List configured devices
-  status --id ID [--json]                Show one device
+  status --id ID [--json] [--lease-only] Show device health or only lease metadata
   checkout [selectors] [--json]          Lease a device
   release --id ID [--lease LEASE]        Cleanup and release a device
   with-lease [selectors] -- CMD [ARGS...] Run a command with a leased device
@@ -305,6 +305,7 @@ func (a *App) cmdStatus(args []string) error {
 	fs := newFlagSet("status", a.stderr)
 	id := fs.String("id", "", "device id")
 	jsonMode := fs.Bool("json", false, "print JSON")
+	leaseOnly := fs.Bool("lease-only", false, "read lease metadata without probing device health")
 	if err := fs.Parse(args); err != nil {
 		return commandError{code: exitUsage, err: err}
 	}
@@ -319,8 +320,16 @@ func (a *App) cmdStatus(args []string) error {
 	if !ok {
 		return commandError{code: exitUsage, err: fmt.Errorf("unknown device id %q", *id)}
 	}
-	status := a.status(context.Background(), rt, device)
+	var status DeviceStatus
+	if *leaseOnly {
+		status.LeaseStatus = a.leaseStatus(rt, device)
+	} else {
+		status = a.status(context.Background(), rt, device)
+	}
 	if *jsonMode {
+		if *leaseOnly {
+			return json.NewEncoder(a.stdout).Encode(status.LeaseStatus)
+		}
 		return json.NewEncoder(a.stdout).Encode(status)
 	}
 	fmt.Fprintf(a.stdout, "id=%s\n", status.ID)
@@ -338,9 +347,11 @@ func (a *App) cmdStatus(args []string) error {
 	if status.HolderAlive != nil {
 		fmt.Fprintf(a.stdout, "holder_alive=%s\n", yesNo(*status.HolderAlive))
 	}
-	fmt.Fprintf(a.stdout, "healthy=%s\n", yesNo(status.Healthy))
-	if status.HealthReason != "" {
-		fmt.Fprintf(a.stdout, "health_reason=%s\n", status.HealthReason)
+	if !*leaseOnly {
+		fmt.Fprintf(a.stdout, "healthy=%s\n", yesNo(status.Healthy))
+		if status.HealthReason != "" {
+			fmt.Fprintf(a.stdout, "health_reason=%s\n", status.HealthReason)
+		}
 	}
 	return nil
 }
@@ -927,6 +938,16 @@ func (a *App) statuses(ctx context.Context, rt *runtimeState) []DeviceStatus {
 }
 
 func (a *App) status(ctx context.Context, rt *runtimeState, device DeviceConfig) DeviceStatus {
+	metadata := a.leaseStatus(rt, device)
+	health := rt.backends.forDevice(device).health(ctx, device)
+	return DeviceStatus{
+		LeaseStatus:  metadata,
+		Healthy:      health.healthy,
+		HealthReason: health.reason,
+	}
+}
+
+func (a *App) leaseStatus(rt *runtimeState, device DeviceConfig) LeaseStatus {
 	locked := rt.store.locked(device.ID)
 	var lease *Lease
 	var holderAlive *bool
@@ -942,18 +963,15 @@ func (a *App) status(ctx context.Context, rt *runtimeState, device DeviceConfig)
 			}
 		}
 	}
-	health := rt.backends.forDevice(device).health(ctx, device)
-	return DeviceStatus{
-		ID:           device.ID,
-		Platform:     device.Platform,
-		Type:         device.Type,
-		Serial:       device.Serial,
-		Labels:       append([]string(nil), device.Labels...),
-		Locked:       locked,
-		Healthy:      health.healthy,
-		HealthReason: health.reason,
-		Lease:        lease,
-		HolderAlive:  holderAlive,
+	return LeaseStatus{
+		ID:          device.ID,
+		Platform:    device.Platform,
+		Type:        device.Type,
+		Serial:      device.Serial,
+		Labels:      append([]string(nil), device.Labels...),
+		Locked:      locked,
+		Lease:       lease,
+		HolderAlive: holderAlive,
 	}
 }
 

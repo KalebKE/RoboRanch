@@ -119,17 +119,22 @@ type Lease struct {
 	ExpiresAt  time.Time  `json:"expiresAt"`
 }
 
+// LeaseStatus is broker metadata only. Reading it never probes the device.
+type LeaseStatus struct {
+	ID          string     `json:"id"`
+	Platform    Platform   `json:"platform"`
+	Type        DeviceType `json:"type"`
+	Serial      string     `json:"serial"`
+	Labels      []string   `json:"labels,omitempty"`
+	Locked      bool       `json:"locked"`
+	Lease       *Lease     `json:"lease,omitempty"`
+	HolderAlive *bool      `json:"holderAlive,omitempty"`
+}
+
 type DeviceStatus struct {
-	ID           string     `json:"id"`
-	Platform     Platform   `json:"platform"`
-	Type         DeviceType `json:"type"`
-	Serial       string     `json:"serial"`
-	Labels       []string   `json:"labels,omitempty"`
-	Locked       bool       `json:"locked"`
-	Healthy      bool       `json:"healthy"`
-	HealthReason string     `json:"healthReason,omitempty"`
-	Lease        *Lease     `json:"lease,omitempty"`
-	HolderAlive  *bool      `json:"holderAlive,omitempty"`
+	LeaseStatus
+	Healthy      bool   `json:"healthy"`
+	HealthReason string `json:"healthReason,omitempty"`
 }
 
 type CheckoutResult struct {
