@@ -542,10 +542,11 @@ Android emulators are cleaned by default on release:
 
 - uninstall third-party packages
 - force-stop packages before uninstall
-- run `am kill-all`
 - run `sync`
-- clear logcat
 - reset animation scales to `0.0`
+
+Logcat is preserved. Cleanup uses the configured repair deadline (120 seconds
+by default); a failed uninstall or cleanup deadline retains the lease for retry.
 
 RoboRanch does not call `pm trim-caches`; that command caused follow-on instrumentation installs to fail in the source pool.
 
@@ -560,7 +561,9 @@ Physical devices are not cleaned by default. Enable cleanup per physical device 
 }
 ```
 
-iOS simulators are cleaned strictly. RoboRanch shuts them down, erases their contents and settings, boots them again, and waits for boot completion before releasing the lock. If erase or warm boot fails, the lease remains locked for `release` or `gc` to retry.
+iOS simulator cleanup follows the configured mode. `shutdown` stops the simulator
+while preserving its contents. The erase mode shuts down, erases, boots, and waits
+for boot completion. Failed cleanup retains the lease for `release` or `gc` to retry.
 
 Physical iPhone cleanup is unsupported. Config validation rejects `cleanup.enabled: true` for an iOS `device`.
 
@@ -570,13 +573,25 @@ Physical iPhone cleanup is unsupported. Config validation rejects `cleanup.enabl
 roboranch init [--force]
 roboranch doctor
 roboranch list [--json]
-roboranch status --id ID [--json]
+roboranch status --id ID [--json] [--lease-only]
 roboranch checkout [--platform android|ios|any] [--type emulator|simulator|device|any] [--label LABEL] [--serial SERIAL_OR_UDID] [--ttl DURATION] [--wait DURATION] [--json]
 roboranch release --id ID [--lease LEASE]
 roboranch with-lease [checkout selectors] -- CMD [ARGS...]
 roboranch repair --id ID|--all
 roboranch gc [--verbose]
 ```
+
+For ownership monitoring, use `roboranch status --id ID --lease-only --json`.
+This reads broker metadata without invoking ADB, `simctl`, or device-health
+checks. Its JSON contains the device identity, lock, lease, and optional holder
+status; it omits `healthy` and `healthReason` because health was not measured.
+Normal `status` and `list` continue to include device health.
+
+Lease-only status is a snapshot, not a renewal or a reservation. Compare the exact
+lease token and expiry, and correlate the lease fingerprint with the lifecycle
+journal when auditing an execution. A missing or unreadable lease is not proof of
+ownership. Clients must still bound the status process and fail closed if the
+metadata cannot be verified.
 
 The exit codes are:
 
