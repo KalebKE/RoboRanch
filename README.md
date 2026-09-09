@@ -221,6 +221,37 @@ The important fields are:
 - `devices[].launchdLabel`: macOS service name used by `repair`.
 - `devices[].systemdUnit`: Linux user service name used by `repair`.
 
+### Lease ownership and failure evidence
+
+Standalone `checkout` returns a lease and exits. Its default `holderPid` is `0`
+(untracked): the lease remains owned until exact-token release or TTL expiry.
+`with-lease` tracks its own long-lived process. An explicit `--holder-pid` must
+identify the actual supervisor on the pool host; do not use a client-machine PID
+or PID 1 as a substitute for ownership. Untracked status omits `holderAlive`.
+
+TTL remains a hard limit, including for `with-lease`; there is no automatic
+renewal. Set it above the complete execution and cleanup budget. Cancellation
+should stop the invocation's processes, then release its exact device ID and
+token. A missing lease is a failure to verify ownership, not successful release.
+
+Acquisition, preparation, repair, release, and GC serialize per device. GC
+rechecks staleness after acquiring that lock so an old scan cannot clean a new
+owner's device. Keep the hidden `.lifecycle` files in the state directory: their
+kernel locks release when the process exits, and the stable files prevent lock
+replacement races. Upgrade every client binary that writes the same state
+directory; older binaries do not participate in these locks.
+
+`stateDir/logs/leases.jsonl` records acquisition, cleanup start/failure, and
+release with UTC timestamps, actor host/PID, target, expiry, and a SHA-256 lease
+fingerprint. The fingerprint correlates events without exposing a usable release
+token. Preserve this file with test reports when investigating shared-device
+failures; automatic GC is recorded even without `--verbose`.
+
+Android cleanup is bounded by `repairTimeout`. An uninstall failure retains the
+lease for an exact-token retry instead of handing a dirty device to another job.
+Cleanup preserves logcat; capture it continuously during tests because its ring
+buffer can still wrap. Unreadable lease metadata is retained for investigation.
+
 Check the config and host:
 
 ```sh

@@ -550,25 +550,37 @@ func (a *App) cmdRepair(args []string) error {
 		if *id != "" && device.ID != *id {
 			continue
 		}
-		if rt.store.locked(device.ID) {
-			if stale, _ := rt.store.stale(device.ID, time.Now()); !stale {
-				skipped++
-				fmt.Fprintf(a.stderr, "roboranch: repair: %s skipped; active lease\n", device.ID)
-				continue
+		func() {
+			unlock, ok, err := rt.store.claimLifecycle(device.ID)
+			if err != nil {
+				failed++
+				return
 			}
-		}
-		if backend.health(context.Background(), device).healthy {
-			healthy++
-			fmt.Fprintf(a.stderr, "roboranch: repair: %s healthy\n", device.ID)
-			continue
-		}
-		fmt.Fprintf(a.stderr, "roboranch: repair: restarting %s\n", device.ID)
-		if err := backend.repair(context.Background(), rt.config, device); err != nil {
-			failed++
-			fmt.Fprintf(a.stderr, "roboranch: repair: %s failed: %s\n", device.ID, err)
-			continue
-		}
-		repaired++
+			if !ok {
+				skipped++
+				return
+			}
+			defer unlock()
+			if rt.store.locked(device.ID) {
+				if stale, _ := rt.store.stale(device.ID, time.Now()); !stale {
+					skipped++
+					fmt.Fprintf(a.stderr, "roboranch: repair: %s skipped; active lease\n", device.ID)
+					return
+				}
+			}
+			if backend.health(context.Background(), device).healthy {
+				healthy++
+				fmt.Fprintf(a.stderr, "roboranch: repair: %s healthy\n", device.ID)
+				return
+			}
+			fmt.Fprintf(a.stderr, "roboranch: repair: restarting %s\n", device.ID)
+			if err := backend.repair(context.Background(), rt.config, device); err != nil {
+				failed++
+				fmt.Fprintf(a.stderr, "roboranch: repair: %s failed: %s\n", device.ID, err)
+				return
+			}
+			repaired++
+		}()
 	}
 	fmt.Fprintf(a.stderr, "roboranch: repair done (healthy=%d repaired=%d failed=%d skipped=%d)\n", healthy, repaired, failed, skipped)
 	if failed > 0 || (*id != "" && skipped > 0) {
@@ -605,6 +617,14 @@ func (a *App) cmdGC(args []string) error {
 }
 
 func (a *App) releaseDevice(ctx context.Context, rt *runtimeState, device DeviceConfig, expectedLease string) error {
+	unlock, ok, err := rt.store.claimLifecycle(device.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return commandError{code: exitUnavailable, err: fmt.Errorf("device operation already in progress for %s", device.ID)}
+	}
+	defer unlock()
 	if err := rt.store.validateRelease(device.ID, expectedLease); err != nil {
 		return commandError{code: exitUsage, err: err}
 	}
@@ -616,58 +636,106 @@ func (a *App) releaseDevice(ctx context.Context, rt *runtimeState, device Device
 		return commandError{code: exitUnavailable, err: fmt.Errorf("cleanup already in progress for %s", device.ID)}
 	}
 	defer rt.store.clearCleanup(device.ID)
+	lease, err := rt.store.readLease(device.ID)
+	if err != nil {
+		return err
+	}
+	if err := rt.store.audit(lease, "cleanup_started", "release"); err != nil {
+		return err
+	}
 	if err := rt.backends.forDevice(device).cleanup(ctx, rt.config, device, a.stderr); err != nil {
+		_ = rt.store.audit(lease, "cleanup_failed", "release: "+err.Error())
 		return commandError{code: exitUnhealthy, err: fmt.Errorf("cleanup failed; lease retained for %s: %w", device.ID, err)}
 	}
 	if err := rt.store.forceRelease(device.ID); err != nil {
 		return commandError{code: exitUnavailable, err: err}
 	}
-	return nil
+	return rt.store.audit(lease, "released", "release")
 }
 
 func (a *App) gc(ctx context.Context, rt *runtimeState, verbose func(string, ...any)) (int, int) {
 	reaped, retained := 0, 0
 	for _, stale := range rt.store.staleLeases(time.Now()) {
-		claimed, err := rt.store.claimCleanup(stale.ID, os.Getpid())
-		if err != nil {
-			retained++
-			if verbose != nil {
-				verbose("retained %s (%s; cleanup claim failed: %s)", stale.ID, stale.Reason, err)
-			}
-			continue
-		}
-		if !claimed {
-			if verbose != nil {
-				verbose("skipped %s (%s; cleanup already in progress)", stale.ID, stale.Reason)
-			}
-			continue
-		}
-		device, configured := findDevice(rt.config.Devices, stale.ID)
-		if configured && device.cleanupEnabled() {
-			if err := rt.backends.forDevice(device).cleanup(ctx, rt.config, device, a.stderr); err != nil {
-				rt.store.clearCleanup(stale.ID)
-				retained++
-				if verbose != nil {
-					verbose("retained %s (%s; cleanup failed: %s)", stale.ID, stale.Reason, err)
-				}
-				continue
-			}
-		}
-		if err := rt.store.forceRelease(stale.ID); err != nil {
-			rt.store.clearCleanup(stale.ID)
-			retained++
-			if verbose != nil {
-				verbose("retained %s (%s; unlock failed: %s)", stale.ID, stale.Reason, err)
-			}
-			continue
-		}
-		rt.store.clearCleanup(stale.ID)
-		reaped++
-		if verbose != nil {
-			verbose("reaped %s (%s)", stale.ID, stale.Reason)
-		}
+		r, k := a.reapStaleDevice(ctx, rt, stale.ID, verbose)
+		reaped += r
+		retained += k
 	}
 	return reaped, retained
+}
+
+func (a *App) reapStaleDevice(ctx context.Context, rt *runtimeState, id string, verbose func(string, ...any)) (int, int) {
+	unlock, ok, err := rt.store.claimLifecycle(id)
+	if err != nil {
+		return 0, 1
+	}
+	if !ok {
+		return 0, 0
+	}
+	defer unlock()
+	// The scan is only a hint. The original lease may have been released and
+	// replaced while GC was waiting; decide again under the device lock.
+	if !rt.store.locked(id) {
+		return 0, 0
+	}
+	isStale, reason := rt.store.stale(id, time.Now())
+	if !isStale {
+		return 0, 0
+	}
+	stale := staleLease{ID: id, Reason: reason}
+	lease, err := rt.store.readLease(id)
+	if err != nil {
+		// Missing or corrupt metadata cannot establish cleanup ownership.
+		if verbose != nil {
+			verbose("retained %s (unreadable lease metadata)", id)
+		}
+		return 0, 1
+	}
+	device, configured := findDevice(rt.config.Devices, id)
+	if !configured {
+		if verbose != nil {
+			verbose("skipped %s (not in this pool configuration)", id)
+		}
+		return 0, 0
+	}
+	claimed, err := rt.store.claimCleanup(stale.ID, os.Getpid())
+	if err != nil {
+		if verbose != nil {
+			verbose("retained %s (%s; cleanup claim failed: %s)", stale.ID, stale.Reason, err)
+		}
+		return 0, 1
+	}
+	if !claimed {
+		if verbose != nil {
+			verbose("skipped %s (%s; cleanup already in progress)", stale.ID, stale.Reason)
+		}
+		return 0, 0
+	}
+	defer rt.store.clearCleanup(stale.ID)
+	if err := rt.store.audit(lease, "cleanup_started", "gc: "+reason); err != nil {
+		return 0, 1
+	}
+	if device.cleanupEnabled() {
+		if err := rt.backends.forDevice(device).cleanup(ctx, rt.config, device, a.stderr); err != nil {
+			_ = rt.store.audit(lease, "cleanup_failed", "gc: "+err.Error())
+			if verbose != nil {
+				verbose("retained %s (%s; cleanup failed: %s)", stale.ID, stale.Reason, err)
+			}
+			return 0, 1
+		}
+	}
+	if err := rt.store.forceRelease(stale.ID); err != nil {
+		if verbose != nil {
+			verbose("retained %s (%s; unlock failed: %s)", stale.ID, stale.Reason, err)
+		}
+		return 0, 1
+	}
+	if err := rt.store.audit(lease, "released", "gc: "+reason); err != nil {
+		return 1, 1
+	}
+	if verbose != nil {
+		verbose("reaped %s (%s)", stale.ID, stale.Reason)
+	}
+	return 1, 0
 }
 
 func (a *App) checkout(ctx context.Context, rt *runtimeState, options checkoutOptions) (CheckoutResult, int, error) {
@@ -730,57 +798,75 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 	hadHealthy := false
 	hadLocked := false
 	for _, device := range candidates {
-		backend := rt.backends.forDevice(device)
-		if rt.store.locked(device.ID) {
-			hadLocked = true
-			fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
-			continue
-		}
-		health := backend.health(ctx, device)
-		if !health.healthy {
-			if backend.repairable(device) {
-				lease, ok, err := rt.store.acquire(device, options.holderPID, options.ttl)
-				if err != nil {
-					return CheckoutResult{}, exitUnavailable, err
-				}
-				if !ok {
-					hadLocked = true
-					fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
-					continue
-				}
-				fmt.Fprintf(a.stderr, "roboranch: repair: %s unhealthy; attempting restart\n", device.ID)
-				if err := backend.repair(ctx, rt.config, device); err != nil {
-					if device.Platform == PlatformIOS && device.Type == DeviceTypeSimulator {
-						if shutdownErr := rt.backends.ios.shutdownSimulator(ctx, device); shutdownErr != nil {
-							return CheckoutResult{}, exitUnhealthy, fmt.Errorf(
-								"repair failed for %s (%v), then shutdown failed; lease retained: %w",
-								device.ID, err, shutdownErr)
-						}
-					}
-					if releaseErr := rt.store.forceRelease(device.ID); releaseErr != nil {
-						return CheckoutResult{}, exitUnavailable, fmt.Errorf("repair failed for %s and lease rollback failed: %w", device.ID, releaseErr)
-					}
-					fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, err)
-					continue
-				}
-				hadHealthy = true
-				return checkoutResult(lease), exitOK, nil
-			} else {
-				fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, health.reason)
-				continue
-			}
-		}
-		hadHealthy = true
-		lease, ok, err := rt.store.acquire(device, options.holderPID, options.ttl)
+		unlock, claimed, err := rt.store.claimLifecycle(device.ID)
 		if err != nil {
 			return CheckoutResult{}, exitUnavailable, err
 		}
-		if !ok {
+		if !claimed {
 			hadLocked = true
-			fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
 			continue
 		}
-		return checkoutResult(lease), exitOK, nil
+		result, code, err := func() (CheckoutResult, int, error) {
+			defer unlock()
+			backend := rt.backends.forDevice(device)
+			if rt.store.locked(device.ID) {
+				hadLocked = true
+				fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
+				return CheckoutResult{}, 0, nil
+			}
+			health := backend.health(ctx, device)
+			if !health.healthy {
+				if backend.repairable(device) {
+					lease, ok, err := rt.store.acquireLocked(device, options.holderPID, options.ttl)
+					if err != nil {
+						return CheckoutResult{}, exitUnavailable, err
+					}
+					if !ok {
+						hadLocked = true
+						fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
+						return CheckoutResult{}, 0, nil
+					}
+					fmt.Fprintf(a.stderr, "roboranch: repair: %s unhealthy; attempting restart\n", device.ID)
+					if err := backend.repair(ctx, rt.config, device); err != nil {
+						if device.Platform == PlatformIOS && device.Type == DeviceTypeSimulator {
+							if shutdownErr := rt.backends.ios.shutdownSimulator(ctx, device); shutdownErr != nil {
+								return CheckoutResult{}, exitUnhealthy, fmt.Errorf(
+									"repair failed for %s (%v), then shutdown failed; lease retained: %w",
+									device.ID, err, shutdownErr)
+							}
+						}
+						if releaseErr := rt.store.forceRelease(device.ID); releaseErr != nil {
+							return CheckoutResult{}, exitUnavailable, fmt.Errorf("repair failed for %s and lease rollback failed: %w", device.ID, releaseErr)
+						}
+						if auditErr := rt.store.audit(lease, "released", "repair failed: "+err.Error()); auditErr != nil {
+							return CheckoutResult{}, exitUnavailable, auditErr
+						}
+						fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, err)
+						return CheckoutResult{}, 0, nil
+					}
+					hadHealthy = true
+					return checkoutResult(lease), exitOK, nil
+				} else {
+					fmt.Fprintf(a.stderr, "roboranch: skip: %s unhealthy: %s\n", device.ID, health.reason)
+					return CheckoutResult{}, 0, nil
+				}
+			}
+			hadHealthy = true
+			lease, ok, err := rt.store.acquireLocked(device, options.holderPID, options.ttl)
+			if err != nil {
+				return CheckoutResult{}, exitUnavailable, err
+			}
+			if !ok {
+				hadLocked = true
+				fmt.Fprintf(a.stderr, "roboranch: skip: %s already locked\n", device.ID)
+				return CheckoutResult{}, 0, nil
+			}
+			return checkoutResult(lease), exitOK, nil
+		}()
+		if err != nil || result.ID != "" {
+			return result, code, err
+		}
+
 	}
 	if !hadHealthy {
 		return CheckoutResult{}, exitUnhealthy, fmt.Errorf("no healthy device available")
@@ -850,8 +936,10 @@ func (a *App) status(ctx context.Context, rt *runtimeState, device DeviceConfig)
 				current.Platform = device.Platform
 			}
 			lease = current
-			alive := processAlive(current.HolderPID)
-			holderAlive = &alive
+			if current.HolderPID > 0 && current.Hostname == rt.store.hostname {
+				alive := processAlive(current.HolderPID)
+				holderAlive = &alive
+			}
 		}
 	}
 	health := rt.backends.forDevice(device).health(ctx, device)
@@ -876,12 +964,17 @@ func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease boo
 	serial := fs.String("serial", "", "serial")
 	ttlRaw := fs.String("ttl", defaultTTL.String(), "lease ttl")
 	waitRaw := fs.String("wait", defaultWait.String(), "wait timeout")
-	holderPID := fs.Int("holder-pid", os.Getpid(), "holder pid")
+	// Standalone checkout exits immediately. Only with-lease or an explicit
+	// long-lived host-local supervisor can supply a meaningful holder PID.
+	holderPID := fs.Int("holder-pid", 0, "holder pid (0 = untracked, expires at TTL)")
 	jsonMode := fs.Bool("json", false, "print JSON")
 	labels := repeatedFlag{}
 	fs.Var(&labels, "label", "required label")
 	if err := fs.Parse(args); err != nil {
 		return checkoutOptions{}, err
+	}
+	if *holderPID < 0 {
+		return checkoutOptions{}, fmt.Errorf("holder pid must be nonnegative")
 	}
 	if withLease && *jsonMode {
 		return checkoutOptions{}, fmt.Errorf("with-lease does not support --json")

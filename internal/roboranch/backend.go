@@ -94,8 +94,10 @@ func (b androidBackend) repair(ctx context.Context, cfg Config, device DeviceCon
 	return b.host.repair(ctx, cfg, b.adb, device)
 }
 
-func (b androidBackend) cleanup(ctx context.Context, _ Config, device DeviceConfig, stderr io.Writer) error {
-	return b.adb.cleanup(ctx, device, stderr)
+func (b androidBackend) cleanup(ctx context.Context, cfg Config, device DeviceConfig, stderr io.Writer) error {
+	cleanupCtx, cancel := context.WithTimeout(ctx, cfg.repairTimeoutDuration())
+	defer cancel()
+	return b.adb.cleanup(cleanupCtx, device, stderr)
 }
 
 func (b androidBackend) repairable(device DeviceConfig) bool {

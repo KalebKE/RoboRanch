@@ -97,14 +97,19 @@ func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer)
 			continue
 		}
 		_, _ = a.run(ctx, device.Serial, "shell", "am", "force-stop", pkg)
-		_, _ = a.run(ctx, device.Serial, "uninstall", pkg)
+		if out, err := a.run(ctx, device.Serial, "uninstall", pkg); err != nil || strings.Contains(out, "Failure") {
+			return fmt.Errorf("uninstall %s on %s failed: %s (%v)", pkg, device.ID, strings.TrimSpace(out), err)
+		}
 	}
-	_, _ = a.run(ctx, device.Serial, "shell", "am", "kill-all")
 	_, _ = a.run(ctx, device.Serial, "shell", "sync")
-	_, _ = a.run(ctx, device.Serial, "logcat", "-c")
+	// Keep crash evidence available after release; consumers capture logcat
+	// continuously and select their own timestamps instead of clearing the ring.
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "window_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "transition_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "animator_duration_scale", "0.0")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	fmt.Fprintf(stderr, "roboranch: cleanup done for %s\n", device.ID)
 	return nil
 }

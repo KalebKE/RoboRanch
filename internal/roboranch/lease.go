@@ -2,6 +2,7 @@ package roboranch
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -71,6 +73,16 @@ func (s *LeaseStore) usedPath(id string) string {
 }
 
 func (s *LeaseStore) acquire(device DeviceConfig, holderPID int, ttl time.Duration) (*Lease, bool, error) {
+	unlock, ok, err := s.claimLifecycle(device.ID)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	defer unlock()
+	return s.acquireLocked(device, holderPID, ttl)
+}
+
+// Caller holds the lifecycle lock, including any device preparation.
+func (s *LeaseStore) acquireLocked(device DeviceConfig, holderPID int, ttl time.Duration) (*Lease, bool, error) {
 	lock := s.lockPath(device.ID)
 	if ok, err := s.createLock(lock, holderPID); err != nil {
 		return nil, false, err
@@ -93,8 +105,64 @@ func (s *LeaseStore) acquire(device DeviceConfig, holderPID int, ttl time.Durati
 		_ = os.Remove(lock)
 		return nil, false, err
 	}
+	if err := s.audit(lease, "acquired", ""); err != nil {
+		_ = s.forceRelease(device.ID)
+		return nil, false, err
+	}
 	_ = os.WriteFile(s.usedPath(device.ID), []byte(now.Format(time.RFC3339Nano)+"\n"), 0o644)
 	return lease, true, nil
+}
+
+// A stable inode and a kernel lock avoid stale-PID unlink races. Never remove
+// these files: an already-open waiter must lock the same inode as new callers.
+// Acquisition, release, and GC all hold this lock while changing a device.
+func (s *LeaseStore) claimLifecycle(id string) (func(), bool, error) {
+	file, err := os.OpenFile(filepath.Join(s.locksDir, "."+id+".lifecycle"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return func() { _ = file.Close() }, true, nil
+}
+
+// Audit records contain an irreversible lease fingerprint, never a release token.
+// Each append is serialized across processes and synced before returning.
+func (s *LeaseStore) audit(lease *Lease, event, reason string) error {
+	if lease == nil {
+		return fmt.Errorf("cannot audit missing lease")
+	}
+	record := struct {
+		Timestamp        time.Time `json:"timestamp"`
+		Event            string    `json:"event"`
+		Device           string    `json:"device"`
+		Serial           string    `json:"serial"`
+		LeaseFingerprint string    `json:"leaseFingerprint"`
+		ActorPID         int       `json:"actorPid"`
+		ActorHost        string    `json:"actorHost"`
+		HolderPID        int       `json:"holderPid"`
+		ExpiresAt        time.Time `json:"expiresAt"`
+		Reason           string    `json:"reason,omitempty"`
+	}{time.Now().UTC(), event, lease.ID, lease.Serial,
+		fmt.Sprintf("%x", sha256.Sum256([]byte(lease.LeaseID))), os.Getpid(), s.hostname,
+		lease.HolderPID, lease.ExpiresAt, reason}
+	file, err := os.OpenFile(filepath.Join(s.stateDir, "logs", "leases.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func (s *LeaseStore) createLock(path string, holderPID int) (bool, error) {
@@ -153,7 +221,7 @@ func (s *LeaseStore) stale(id string, now time.Time) (bool, string) {
 	if lease.ExpiresAt.Before(now.UTC()) {
 		return true, "expired"
 	}
-	if lease.Hostname == s.hostname && !processAlive(lease.HolderPID) {
+	if lease.HolderPID > 0 && lease.Hostname == s.hostname && !processAlive(lease.HolderPID) {
 		return true, fmt.Sprintf("pid %d dead", lease.HolderPID)
 	}
 	return false, ""
@@ -172,6 +240,14 @@ func (s *LeaseStore) readLease(id string) (*Lease, error) {
 }
 
 func (s *LeaseStore) release(id string, expectedLease string) error {
+	unlock, ok, err := s.claimLifecycle(id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("device operation already in progress for %s", id)
+	}
+	defer unlock()
 	if err := s.validateRelease(id, expectedLease); err != nil {
 		return err
 	}
@@ -190,7 +266,7 @@ func (s *LeaseStore) validateRelease(id string, expectedLease string) error {
 		return err
 	}
 	if expectedLease != "" && lease.LeaseID != expectedLease {
-		return fmt.Errorf("lease mismatch for %s: got %s expected %s", id, lease.LeaseID, expectedLease)
+		return fmt.Errorf("lease mismatch for %s", id)
 	}
 	return nil
 }
