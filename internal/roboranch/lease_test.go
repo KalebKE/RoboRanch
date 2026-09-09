@@ -309,6 +309,9 @@ func TestCleanupUninstallsThirdPartyPackagesWithoutTrimCaches(t *testing.T) {
 	if strings.Contains(joined, "trim-caches") {
 		t.Fatalf("cleanup must not call pm trim-caches; calls:\n%s", joined)
 	}
+	if strings.Contains(joined, "logcat -c") || strings.Contains(joined, "am kill-all") {
+		t.Fatalf("cleanup erased logs or killed packages without targeting them: %s", joined)
+	}
 }
 
 func TestFilterDevicesRequiresAllLabels(t *testing.T) {
