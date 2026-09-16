@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -189,3 +191,55 @@ func TestStandaloneCheckoutSurvivesConcurrentGCAndCheckout(t *testing.T) {
 		t.Fatal("diagnostics exposed the lease token")
 	}
 }
+
+// PID 1 is init. It is never the process that took a lease, and recording it as the holder is
+// strictly worse than recording no holder at all: `stale` asks whether the holder is still
+// alive, init always is, so the lease becomes unreclaimable until its TTL while still looking
+// tracked. Four devices sat locked for hours behind exactly this on 2026-09-16.
+func TestCheckoutRejectsInitAsHolder(t *testing.T) {
+	if _, err := parseCheckoutOptions([]string{"--holder-pid", "1"}, time.Hour, false, io.Discard); err == nil {
+		t.Fatal("expected --holder-pid 1 to be rejected")
+	} else if !strings.Contains(err.Error(), "0") {
+		t.Fatalf("the error must point at the untracked value: %v", err)
+	}
+}
+
+func TestCheckoutAcceptsUntrackedAndRealHolders(t *testing.T) {
+	for _, pid := range []int{0, os.Getpid()} {
+		if _, err := parseCheckoutOptions([]string{"--holder-pid", itoa(pid)}, time.Hour, false, io.Discard); err != nil {
+			t.Fatalf("holder pid %d must be accepted: %v", pid, err)
+		}
+	}
+}
+
+// Defence in depth for leases already on disk carrying the bad value: a holder that cannot be
+// a holder is treated as no holder, so the lease falls back to TTL rather than reading as a
+// live one forever.
+func TestStaleTreatsInitHolderAsUntracked(t *testing.T) {
+	store, err := newLeaseStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.hostname = "test-host"
+	lease := &Lease{
+		LeaseID: "lease", ID: "test-1", HolderPID: 1, Hostname: "test-host",
+		AcquiredAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := writeJSONAtomic(store.leasePath("test-1"), lease, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if stale, reason := store.stale("test-1", time.Now().UTC()); stale {
+		t.Fatalf("an unexpired untracked lease is not stale: %s", reason)
+	}
+
+	lease.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+	if err := writeJSONAtomic(store.leasePath("test-1"), lease, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale, reason := store.stale("test-1", time.Now().UTC())
+	if !stale || reason != "expired" {
+		t.Fatalf("an expired lease must be reclaimable regardless of holder: %v %q", stale, reason)
+	}
+}
+
+func itoa(v int) string { return strconv.Itoa(v) }

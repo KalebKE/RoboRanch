@@ -221,7 +221,12 @@ func (s *LeaseStore) stale(id string, now time.Time) (bool, string) {
 	if lease.ExpiresAt.Before(now.UTC()) {
 		return true, "expired"
 	}
-	if lease.HolderPID > 0 && lease.Hostname == s.hostname && !processAlive(lease.HolderPID) {
+	// A lease already on disk can carry a holder that cannot be one — init, most often, from
+	// a caller that wanted TTL-only semantics and reached for pid 1 to get them. Treat it as
+	// untracked rather than as permanently alive, so the lease is bounded by its TTL instead
+	// of by a liveness check that can never fail.
+	if isHolderPID(lease.HolderPID) && lease.HolderPID > 0 &&
+		lease.Hostname == s.hostname && !processAlive(lease.HolderPID) {
 		return true, fmt.Sprintf("pid %d dead", lease.HolderPID)
 	}
 	return false, ""
@@ -359,6 +364,14 @@ func newLeaseID() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	encoded := hex.EncodeToString(b[:])
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+}
+
+// isHolderPID reports whether a pid could be the process that took a lease.
+//
+// 0 is the documented "untracked" value. 1 is init: it is always alive, so accepting it as a
+// holder turns the liveness check into a permanent yes. Negative values are not pids.
+func isHolderPID(pid int) bool {
+	return pid == 0 || pid > 1
 }
 
 func processAlive(pid int) bool {
