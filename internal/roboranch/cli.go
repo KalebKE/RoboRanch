@@ -994,6 +994,16 @@ func parseCheckoutOptions(args []string, defaultTTL time.Duration, withLease boo
 	if *holderPID < 0 {
 		return checkoutOptions{}, fmt.Errorf("holder pid must be nonnegative")
 	}
+	// PID 1 is init, which is never the process that took a lease. Recording it is strictly
+	// worse than recording no holder: `stale` asks whether the holder is still alive, init
+	// always is, so the lease survives its caller's death and stays locked until TTL while
+	// still reading as tracked. Callers that have no long-lived holder process want 0, which
+	// says so honestly and is bounded by TTL alone.
+	if !isHolderPID(*holderPID) {
+		return checkoutOptions{}, fmt.Errorf(
+			"holder pid %d cannot hold a lease; pass 0 for an untracked lease that expires at TTL",
+			*holderPID)
+	}
 	if withLease && *jsonMode {
 		return checkoutOptions{}, fmt.Errorf("with-lease does not support --json")
 	}
