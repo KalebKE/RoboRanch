@@ -97,6 +97,8 @@ func (a *App) execute(args []string) int {
 		err = a.cmdRelease(commandArgs)
 	case "with-lease":
 		err = a.cmdWithLease(commandArgs)
+	case "recycle":
+		err = a.cmdRecycle(commandArgs)
 	case "repair":
 		err = a.cmdRepair(commandArgs)
 	case "gc":
@@ -148,6 +150,7 @@ Commands:
   checkout [selectors] [--json]          Lease a device
   release --id ID [--lease LEASE]        Cleanup and release a device
   with-lease [selectors] -- CMD [ARGS...] Run a command with a leased device
+  recycle --id ID|--all                  Reboot idle simulators, preserving installed apps
   repair --id ID|--all                   Restart unhealthy virtual devices
   gc [--verbose]                         Reap stale or expired leases
 
@@ -529,6 +532,64 @@ func signalProcessGroup(pid int, sig syscall.Signal) {
 	_ = syscall.Kill(pid, sig)
 }
 
+// cmdRecycle reboots pool simulators without erasing them — the hygiene a
+// prepare-once pool cannot get from cleanup, for running between long batteries
+// by hand (tracqi-ios#1154).
+func (a *App) cmdRecycle(args []string) error {
+	fs := newFlagSet("recycle", a.stderr)
+	id := fs.String("id", "", "device id")
+	all := fs.Bool("all", false, "recycle every idle simulator")
+	if err := fs.Parse(args); err != nil {
+		return commandError{code: exitUsage, err: err}
+	}
+	if *id == "" && !*all {
+		return commandError{code: exitUsage, err: fmt.Errorf("recycle requires --id or --all")}
+	}
+	rt, err := a.load()
+	if err != nil {
+		return err
+	}
+	if *id != "" {
+		device, ok := findDevice(rt.config.Devices, *id)
+		if !ok {
+			return commandError{code: exitUsage, err: fmt.Errorf("unknown device id %q", *id)}
+		}
+		if device.Type != DeviceTypeSimulator {
+			return commandError{code: exitUsage, err: fmt.Errorf("%s is not a simulator", device.ID)}
+		}
+	}
+	recycled, skipped, failed := 0, 0, 0
+	for _, device := range rt.config.Devices {
+		if device.Type != DeviceTypeSimulator {
+			continue
+		}
+		if *id != "" && device.ID != *id {
+			continue
+		}
+		// A leased simulator is mid-test; rebooting it is the failure this
+		// command exists to prevent, not the fix.
+		if rt.store.locked(device.ID) {
+			if stale, _ := rt.store.stale(device.ID, time.Now()); !stale {
+				skipped++
+				fmt.Fprintf(a.stderr, "roboranch: recycle: %s skipped; active lease\n", device.ID)
+				continue
+			}
+		}
+		if err := rt.backends.forDevice(device).recycle(context.Background(), rt.config, device, a.stderr); err != nil {
+			failed++
+			fmt.Fprintf(a.stderr, "roboranch: recycle: %s failed: %s\n", device.ID, err)
+			continue
+		}
+		rt.store.resetCycles(device.ID)
+		recycled++
+	}
+	fmt.Fprintf(a.stderr, "roboranch: recycle done: recycled=%d skipped=%d failed=%d\n", recycled, skipped, failed)
+	if failed > 0 {
+		return commandError{code: exitUnhealthy, err: fmt.Errorf("recycle failed for %d simulator(s)", failed)}
+	}
+	return nil
+}
+
 func (a *App) cmdRepair(args []string) error {
 	fs := newFlagSet("repair", a.stderr)
 	id := fs.String("id", "", "device id")
@@ -658,10 +719,37 @@ func (a *App) releaseDevice(ctx context.Context, rt *runtimeState, device Device
 		_ = rt.store.audit(lease, "cleanup_failed", "release: "+err.Error())
 		return commandError{code: exitUnhealthy, err: fmt.Errorf("cleanup failed; lease retained for %s: %w", device.ID, err)}
 	}
+	a.maintainAfterRelease(ctx, rt, device)
 	if err := rt.store.forceRelease(device.ID); err != nil {
 		return commandError{code: exitUnavailable, err: err}
 	}
 	return rt.store.audit(lease, "released", "release")
+}
+
+// maintainAfterRelease keeps a simulator from wearing out across a long battery
+// (tracqi-ios#1154).
+//
+// Any cleanup mode other than `none` already refreshes the device — a reset
+// erases and boots it, a shutdown leaves the next checkout to boot it — so
+// those only forget their count. `none` is the prepare-once pools, where a
+// reset would wipe the installed app and nothing refreshes anything; they are
+// rebooted every `cleanup.recycleAfter` leases instead. A failed recycle is
+// reported and not fatal: the lease still releases, and the next release tries
+// again.
+func (a *App) maintainAfterRelease(ctx context.Context, rt *runtimeState, device DeviceConfig) {
+	if device.cleanupMode() != CleanupNone {
+		rt.store.resetCycles(device.ID)
+		return
+	}
+	cycles := rt.store.recordCycle(device.ID)
+	if !device.recycleDue(cycles) {
+		return
+	}
+	if err := rt.backends.forDevice(device).recycle(ctx, rt.config, device, a.stderr); err != nil {
+		fmt.Fprintf(a.stderr, "roboranch: recycle: %s failed after %d cycles: %s\n", device.ID, cycles, err)
+		return
+	}
+	rt.store.resetCycles(device.ID)
 }
 
 func (a *App) gc(ctx context.Context, rt *runtimeState, verbose func(string, ...any)) (int, int) {
