@@ -18,10 +18,11 @@ import (
 )
 
 type LeaseStore struct {
-	stateDir string
-	locksDir string
-	usedDir  string
-	hostname string
+	stateDir  string
+	locksDir  string
+	usedDir   string
+	cyclesDir string
+	hostname  string
 }
 
 type staleLease struct {
@@ -35,10 +36,11 @@ func newLeaseStore(stateDir string) (*LeaseStore, error) {
 		host = "unknown"
 	}
 	store := &LeaseStore{
-		stateDir: stateDir,
-		locksDir: filepath.Join(stateDir, "locks"),
-		usedDir:  filepath.Join(stateDir, "last-used"),
-		hostname: host,
+		stateDir:  stateDir,
+		locksDir:  filepath.Join(stateDir, "locks"),
+		usedDir:   filepath.Join(stateDir, "last-used"),
+		cyclesDir: filepath.Join(stateDir, "cycles"),
+		hostname:  host,
 	}
 	if err := os.MkdirAll(store.locksDir, 0o755); err != nil {
 		return nil, err
@@ -47,6 +49,9 @@ func newLeaseStore(stateDir string) (*LeaseStore, error) {
 		return nil, err
 	}
 	if err := os.MkdirAll(store.usedDir, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(store.cyclesDir, 0o755); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -70,6 +75,30 @@ func (s *LeaseStore) operationPath(name string) string {
 
 func (s *LeaseStore) usedPath(id string) string {
 	return filepath.Join(s.usedDir, id+".used")
+}
+
+func (s *LeaseStore) cyclesPath(id string) string {
+	return filepath.Join(s.cyclesDir, id+".count")
+}
+
+// recordCycle counts one completed lease for a device and returns the running
+// total. An unreadable or corrupt count starts again from zero rather than
+// failing a release: the counter is hygiene, not bookkeeping anyone depends on.
+func (s *LeaseStore) recordCycle(id string) int {
+	count := 0
+	if data, err := os.ReadFile(s.cyclesPath(id)); err == nil {
+		if parsed, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil && parsed > 0 {
+			count = parsed
+		}
+	}
+	count++
+	_ = os.WriteFile(s.cyclesPath(id), []byte(strconv.Itoa(count)+"\n"), 0o644)
+	return count
+}
+
+// resetCycles forgets a device's count, after the reboot that earned it.
+func (s *LeaseStore) resetCycles(id string) {
+	_ = os.Remove(s.cyclesPath(id))
 }
 
 func (s *LeaseStore) acquire(device DeviceConfig, holderPID int, ttl time.Duration) (*Lease, bool, error) {

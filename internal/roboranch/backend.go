@@ -38,6 +38,7 @@ type deviceBackend interface {
 	health(context.Context, DeviceConfig) deviceHealth
 	repair(context.Context, Config, DeviceConfig) error
 	cleanup(context.Context, Config, DeviceConfig, io.Writer) error
+	recycle(context.Context, Config, DeviceConfig, io.Writer) error
 	repairable(DeviceConfig) bool
 	environment(DeviceConfig) []string
 }
@@ -98,6 +99,13 @@ func (b androidBackend) cleanup(ctx context.Context, cfg Config, device DeviceCo
 	cleanupCtx, cancel := context.WithTimeout(ctx, cfg.repairTimeoutDuration())
 	defer cancel()
 	return b.adb.cleanup(cleanupCtx, device, stderr)
+}
+
+// recycle has no meaning for an emulator or a physical Android device: the
+// wear this addresses is CoreSimulator's (tracqi-ios#1154), and an emulator is
+// restored from its snapshot instead.
+func (b androidBackend) recycle(_ context.Context, _ Config, device DeviceConfig, _ io.Writer) error {
+	return fmt.Errorf("%s is not a simulator", device.ID)
 }
 
 func (b androidBackend) repairable(device DeviceConfig) bool {
@@ -231,6 +239,24 @@ func (b iosBackend) shutdownSimulator(ctx context.Context, device DeviceConfig) 
 	} else {
 		return fmt.Errorf("shutdown simulator %s: %w", device.ID, err)
 	}
+}
+
+// recycle restores a worn simulator without erasing it: the installed app
+// survives, which is what lets a prepare-once pool use this at all
+// (tracqi-ios#1154).
+func (b iosBackend) recycle(ctx context.Context, cfg Config, device DeviceConfig, stderr io.Writer) error {
+	if device.Type != DeviceTypeSimulator {
+		return fmt.Errorf("%s is not a simulator", device.ID)
+	}
+	recycleCtx, cancel := context.WithTimeout(ctx, deviceBootTimeout(cfg, device))
+	defer cancel()
+	fmt.Fprintf(stderr, "roboranch: recycling %s (%s) — reboot, no erase\n", device.ID, device.Serial)
+	_, _ = b.runner.Run(recycleCtx, "xcrun", "simctl", "shutdown", device.Serial)
+	if _, err := b.runner.Run(recycleCtx, "xcrun", "simctl", "bootstatus", device.Serial, "-b"); err != nil {
+		return fmt.Errorf("boot simulator %s: %w", device.ID, err)
+	}
+	fmt.Fprintf(stderr, "roboranch: recycle done for %s\n", device.ID)
+	return nil
 }
 
 func (b iosBackend) repairable(device DeviceConfig) bool {

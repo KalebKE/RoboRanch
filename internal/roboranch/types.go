@@ -77,6 +77,19 @@ type DeviceConfig struct {
 type CleanupConfig struct {
 	Enabled *bool  `json:"enabled,omitempty"`
 	Mode    string `json:"mode,omitempty"`
+
+	// RecycleAfter is how many leases a simulator serves before it is shut down
+	// and booted again — no erase, so the installed app survives.
+	//
+	// CoreSimulator wears out: after roughly 350 launch/teardown cycles on one
+	// booted device the runner could no longer install or launch, reporting
+	// `Mach error -308 (ipc/mig) server died` (tracqi-ios#1154). A cleanup mode
+	// that refreshes the device fixes it, which is why a pool running
+	// `cleanup.mode: none` — the prepare-once pools, where a reset would wipe the
+	// installed app — needs this instead.
+	//
+	// 0 turns recycling off. Unset means defaultRecycleAfterCycles.
+	RecycleAfter *int `json:"recycleAfter,omitempty"`
 }
 
 type CleanupMode string
@@ -101,6 +114,30 @@ func (d DeviceConfig) cleanupMode() CleanupMode {
 		return CleanupReset
 	}
 	return CleanupNone
+}
+
+// Well under the ~350 cycles that killed CoreSimulator, and cheap: a shutdown
+// and boot costs seconds against a battery that runs for hours.
+const defaultRecycleAfterCycles = 50
+
+// recycleAfterCycles is how many leases this device serves between reboots.
+// Only simulators recycle: an emulator has its own snapshot lifecycle and a
+// physical device cannot be rebooted from here.
+func (d DeviceConfig) recycleAfterCycles() int {
+	if d.Type != DeviceTypeSimulator {
+		return 0
+	}
+	if d.Cleanup != nil && d.Cleanup.RecycleAfter != nil {
+		return *d.Cleanup.RecycleAfter
+	}
+	return defaultRecycleAfterCycles
+}
+
+// recycleDue reports whether a device that has served `cycles` leases is owed a
+// reboot before the next one.
+func (d DeviceConfig) recycleDue(cycles int) bool {
+	after := d.recycleAfterCycles()
+	return after > 0 && cycles >= after
 }
 
 func (d DeviceConfig) cleanupEnabled() bool {
