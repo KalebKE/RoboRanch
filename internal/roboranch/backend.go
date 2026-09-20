@@ -255,8 +255,37 @@ func (b iosBackend) recycle(ctx context.Context, cfg Config, device DeviceConfig
 	if _, err := b.runner.Run(recycleCtx, "xcrun", "simctl", "bootstatus", device.Serial, "-b"); err != nil {
 		return fmt.Errorf("boot simulator %s: %w", device.ID, err)
 	}
+	b.warm(recycleCtx, device, stderr)
 	fmt.Fprintf(stderr, "roboranch: recycle done for %s\n", device.ID)
 	return nil
+}
+
+// warm makes a freshly booted simulator useful, not merely booted.
+//
+// Best effort throughout: the device is already rebooted and serviceable, and
+// failing a release over an optimisation would strand the lease. Every warm-up
+// error is reported and swallowed.
+func (b iosBackend) warm(ctx context.Context, device DeviceConfig, stderr io.Writer) {
+	// Reads the install database, which is the first thing a test host asks for
+	// and the first thing that is slow on a cold device. Needs no app, so it
+	// runs for every pool.
+	if _, err := b.runner.Run(ctx, "xcrun", "simctl", "listapps", device.Serial); err != nil {
+		fmt.Fprintf(stderr, "roboranch: warm: %s listapps failed: %s\n", device.ID, err)
+	}
+
+	bundleID := device.warmBundleID()
+	if bundleID == "" {
+		return
+	}
+	// The real warm-up where a pool has an app installed: the first launch is
+	// what the next consumer would otherwise pay for.
+	if _, err := b.runner.Run(ctx, "xcrun", "simctl", "launch", device.Serial, bundleID); err != nil {
+		fmt.Fprintf(stderr, "roboranch: warm: %s launch failed: %s\n", device.ID, err)
+		return
+	}
+	if _, err := b.runner.Run(ctx, "xcrun", "simctl", "terminate", device.Serial, bundleID); err != nil {
+		fmt.Fprintf(stderr, "roboranch: warm: %s terminate failed: %s\n", device.ID, err)
+	}
 }
 
 func (b iosBackend) repairable(device DeviceConfig) bool {
