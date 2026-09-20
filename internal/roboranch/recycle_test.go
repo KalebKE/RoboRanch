@@ -31,6 +31,8 @@ func TestSimulatorRecycleRebootsWithoutErasing(t *testing.T) {
 	want := []string{
 		"xcrun simctl shutdown SIM-1",
 		"xcrun simctl bootstatus SIM-1 -b",
+		// Warming the device the reboot just cooled (tracqi-ios#1154).
+		"xcrun simctl listapps SIM-1",
 	}
 	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected recycle calls:\n%s", strings.Join(calls, "\n"))
@@ -211,6 +213,7 @@ func TestReleaseRebootsASimulatorAtItsThreshold(t *testing.T) {
 	want := []string{
 		"xcrun simctl shutdown SIM-1",
 		"xcrun simctl bootstatus SIM-1 -b",
+		"xcrun simctl listapps SIM-1",
 	}
 	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected recycle calls:\n%s", strings.Join(calls, "\n"))
@@ -278,5 +281,83 @@ func TestAFailedRecycleDoesNotBlockTheRelease(t *testing.T) {
 	// another full threshold on a simulator that is already worn.
 	if got := store.recordCycle(device.ID); got != 2 {
 		t.Fatalf("count after a failed recycle = %d, want it kept at 2", got)
+	}
+}
+
+// MARK: - Warming the device the reboot just cooled
+
+// A recycled simulator is handed over cold, and the first XCUITest host launch
+// pays for that: across two conformance batteries the first request after a
+// reboot timed out on 2 of 8 recycles, recovering on the next run
+// (tracqi-ios#1154). `bootstatus -b` waits for the boot to finish, not for the
+// device to be useful.
+
+func TestRecycleWarmsTheDeviceAfterBooting(t *testing.T) {
+	var calls []string
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return "", nil
+	})}
+	device := DeviceConfig{ID: "sim", Platform: PlatformIOS, Type: DeviceTypeSimulator, Serial: "SIM-1"}
+
+	if err := backend.recycle(context.Background(), Config{}, device, ioDiscard{}); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(calls, "\n")
+	if !strings.Contains(joined, "simctl listapps SIM-1") {
+		t.Fatalf("a recycled device must be warmed before it is handed back:\n%s", joined)
+	}
+	bootIndex := strings.Index(joined, "bootstatus")
+	warmIndex := strings.Index(joined, "listapps")
+	if bootIndex == -1 || warmIndex < bootIndex {
+		t.Fatalf("warming must follow the boot, not precede it:\n%s", joined)
+	}
+	if strings.Contains(joined, "erase") {
+		t.Fatal("warming must not erase")
+	}
+}
+
+func TestRecycleLaunchesTheConfiguredAppToWarmIt(t *testing.T) {
+	var calls []string
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return "", nil
+	})}
+	device := DeviceConfig{
+		ID: "sim", Platform: PlatformIOS, Type: DeviceTypeSimulator, Serial: "SIM-1",
+		Cleanup: &CleanupConfig{Mode: string(CleanupNone), WarmBundleID: "com.tracqi.OBD2"},
+	}
+
+	if err := backend.recycle(context.Background(), Config{}, device, ioDiscard{}); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(calls, "\n")
+	if !strings.Contains(joined, "simctl launch SIM-1 com.tracqi.OBD2") {
+		t.Fatalf("a configured bundle id is the real warm-up:\n%s", joined)
+	}
+	if !strings.Contains(joined, "simctl terminate SIM-1 com.tracqi.OBD2") {
+		t.Fatalf("the warm-up launch must not be left running:\n%s", joined)
+	}
+}
+
+func TestWarmUpFailureLeavesTheRecycleSuccessful(t *testing.T) {
+	backend := iosBackend{runner: runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "listapps") || strings.Contains(joined, "launch") {
+			return "", errors.New("warm failed")
+		}
+		return "", nil
+	})}
+	device := DeviceConfig{
+		ID: "sim", Platform: PlatformIOS, Type: DeviceTypeSimulator, Serial: "SIM-1",
+		Cleanup: &CleanupConfig{Mode: string(CleanupNone), WarmBundleID: "com.tracqi.OBD2"},
+	}
+
+	// The device is rebooted and usable; a warm-up is an optimisation, and
+	// failing the release over it would strand the lease.
+	if err := backend.recycle(context.Background(), Config{}, device, ioDiscard{}); err != nil {
+		t.Fatalf("a failed warm-up must not fail the recycle: %v", err)
 	}
 }

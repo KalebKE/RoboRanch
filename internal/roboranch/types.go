@@ -90,6 +90,16 @@ type CleanupConfig struct {
 	//
 	// 0 turns recycling off. Unset means defaultRecycleAfterCycles.
 	RecycleAfter *int `json:"recycleAfter,omitempty"`
+
+	// WarmBundleID is an app to launch and quit after a recycle, so the next
+	// consumer does not pay the first-launch cost of a freshly booted device.
+	//
+	// `bootstatus -b` waits for the boot to finish, not for the device to be
+	// useful: across two conformance batteries the first request after a reboot
+	// timed out on 2 of 8 recycles and recovered on the next run
+	// (tracqi-ios#1154). Unset falls back to a generic warm-up that needs no
+	// app.
+	WarmBundleID string `json:"warmBundleId,omitempty"`
 }
 
 type CleanupMode string
@@ -131,6 +141,14 @@ func (d DeviceConfig) recycleAfterCycles() int {
 		return *d.Cleanup.RecycleAfter
 	}
 	return defaultRecycleAfterCycles
+}
+
+// warmBundleID is the app to launch and quit after a recycle, if one is named.
+func (d DeviceConfig) warmBundleID() string {
+	if d.Cleanup == nil {
+		return ""
+	}
+	return d.Cleanup.WarmBundleID
 }
 
 // recycleDue reports whether a device that has served `cycles` leases is owed a
