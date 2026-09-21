@@ -575,11 +575,21 @@ roboranch doctor
 roboranch list [--json]
 roboranch status --id ID [--json] [--lease-only]
 roboranch checkout [--platform android|ios|any] [--type emulator|simulator|device|any] [--label LABEL] [--serial SERIAL_OR_UDID] [--ttl DURATION] [--wait DURATION] [--json]
-roboranch release --id ID [--lease LEASE]
+roboranch release --id ID [--lease LEASE] [--force]
 roboranch with-lease [checkout selectors] -- CMD [ARGS...]
 roboranch repair --id ID|--all
 roboranch gc [--verbose]
 ```
+
+`release --id ID` without `--lease` is the repair form: it exists to free a device whose
+holder died and left the lock behind. It refuses when the holder is still running on this
+host, because the pool is shared — CI jobs and agent sessions queue on the same devices
+through the same checkout — and releasing a live lease takes the device out from under
+whatever is using it. Pass `--lease LEASE` to release your own device, or `--force` when
+you genuinely mean to take someone else's.
+
+If `checkout` reports the pool is full, wait for it: `--wait` blocks, and that is the
+queue working. Force-releasing is not the way through.
 
 For ownership monitoring, use `roboranch status --id ID --lease-only --json`.
 This reads broker metadata without invoking ADB, `simctl`, or device-health

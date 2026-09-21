@@ -383,6 +383,7 @@ func (a *App) cmdRelease(args []string) error {
 	fs := newFlagSet("release", a.stderr)
 	id := fs.String("id", "", "device id")
 	lease := fs.String("lease", "", "expected lease id")
+	force := fs.Bool("force", false, "release even when the holder is still running")
 	if err := fs.Parse(args); err != nil {
 		return commandError{code: exitUsage, err: err}
 	}
@@ -397,10 +398,49 @@ func (a *App) cmdRelease(args []string) error {
 	if !ok {
 		return commandError{code: exitUsage, err: fmt.Errorf("unknown device id %q", *id)}
 	}
+	if *force {
+		return a.forceReleaseDevice(context.Background(), rt, device)
+	}
 	if err := a.releaseDevice(context.Background(), rt, device, *lease); err != nil {
 		return err
 	}
 	return nil
+}
+
+// The unqualified `release --id X` exists to repair a lease whose holder died: that
+// leaves the device locked with nothing to unlock it. A holder that is still running is
+// the opposite case — the device is in use, and releasing it takes the simulator out
+// from under whatever is running there.
+//
+// The pool is shared by design: CI jobs and agent sessions queue on the same devices
+// through the same checkout. So this command is also the one reached for when checkout
+// reports the pool full, and used that way it kills the job holding the device. The
+// damage surfaces somewhere else entirely, as a flaky test.
+//
+// Refuse, and let --force be the thing you have to type when you mean it. Only a holder
+// on this host can be checked; a lease held elsewhere is left alone as before.
+func (a *App) refuseIfHolderIsAlive(rt *runtimeState, device DeviceConfig) error {
+	lease, err := rt.store.readLease(device.ID)
+	if err != nil || lease == nil {
+		return nil
+	}
+	if lease.Hostname != rt.store.hostname || lease.HolderPID <= 0 {
+		return nil
+	}
+	if lease.HolderPID == os.Getpid() || !processAlive(lease.HolderPID) {
+		return nil
+	}
+	return commandError{code: exitUsage, err: fmt.Errorf(
+		"%s is held by a running process (pid=%d); pass --lease %s to release it as its holder, "+
+			"or --force to take it anyway",
+		device.ID, lease.HolderPID, lease.LeaseID,
+	)}
+}
+
+// Releases regardless of who holds the device. Separate from releaseDevice so the guard
+// cannot be reached past by accident: taking a live lease is a deliberate act.
+func (a *App) forceReleaseDevice(ctx context.Context, rt *runtimeState, device DeviceConfig) error {
+	return a.release(ctx, rt, device, "", true)
 }
 
 func (a *App) cmdWithLease(args []string) error {
@@ -688,7 +728,15 @@ func (a *App) cmdGC(args []string) error {
 	return nil
 }
 
-func (a *App) releaseDevice(ctx context.Context, rt *runtimeState, device DeviceConfig, expectedLease string) error {
+func (a *App) releaseDevice(
+	ctx context.Context, rt *runtimeState, device DeviceConfig, expectedLease string,
+) error {
+	return a.release(ctx, rt, device, expectedLease, false)
+}
+
+func (a *App) release(
+	ctx context.Context, rt *runtimeState, device DeviceConfig, expectedLease string, force bool,
+) error {
 	unlock, ok, err := rt.store.claimLifecycle(device.ID)
 	if err != nil {
 		return err
@@ -699,6 +747,11 @@ func (a *App) releaseDevice(ctx context.Context, rt *runtimeState, device Device
 	defer unlock()
 	if err := rt.store.validateRelease(device.ID, expectedLease); err != nil {
 		return commandError{code: exitUsage, err: err}
+	}
+	if expectedLease == "" && !force {
+		if err := a.refuseIfHolderIsAlive(rt, device); err != nil {
+			return err
+		}
 	}
 	claimed, err := rt.store.claimCleanup(device.ID, os.Getpid())
 	if err != nil {
