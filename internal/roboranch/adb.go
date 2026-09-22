@@ -107,6 +107,14 @@ func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer)
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "window_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "transition_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "animator_duration_scale", "0.0")
+	// Resync the guest clock to the host on every cleanup. A drifted clock fails TLS chain
+	// validation against any certificate issued after the guest's idea of now: ci-pool-4 sat
+	// 155 days in the past on 2026-09-21 and every Firebase call on the lease died with
+	// "Chain validation failed", while get-state and sys.boot_completed — the only health
+	// checks — both passed. auto_time alone did not recover it, so the epoch is set
+	// explicitly; both are best-effort because a physical device can refuse.
+	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "auto_time", "1")
+	_, _ = a.run(ctx, device.Serial, "shell", "date", fmt.Sprintf("@%d", time.Now().Unix()))
 	if err := ctx.Err(); err != nil {
 		return err
 	}

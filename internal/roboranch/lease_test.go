@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -311,6 +312,30 @@ func TestCleanupUninstallsThirdPartyPackagesWithoutTrimCaches(t *testing.T) {
 	}
 	if strings.Contains(joined, "logcat -c") || strings.Contains(joined, "am kill-all") {
 		t.Fatalf("cleanup erased logs or killed packages without targeting them: %s", joined)
+	}
+}
+
+// A guest clock that has drifted fails TLS chain validation against any certificate issued
+// after its idea of now. ci-pool-4 sat 155 days in the past on 2026-09-21: every Firebase
+// call on the lease died with "Chain validation failed" while get-state and
+// sys.boot_completed — the only health checks — both passed. Cleanup therefore resyncs the
+// clock on every cycle rather than trusting auto_time to have kept up.
+func TestCleanupResyncsTheGuestClock(t *testing.T) {
+	runner := &fakeRunner{
+		states:   map[string]string{"emulator-5554": "device"},
+		packages: map[string][]string{"emulator-5554": {}},
+	}
+	adb := newADB("adb", runner)
+	if err := adb.cleanup(context.Background(), DeviceConfig{ID: "emu-1", Type: DeviceTypeEmulator, Serial: "emulator-5554"}, ioDiscard{}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.calls, "\n")
+	if !strings.Contains(joined, "settings put global auto_time 1") {
+		t.Fatalf("cleanup must re-enable auto_time; calls:\n%s", joined)
+	}
+	re := regexp.MustCompile(`shell date @\d{10}`)
+	if !re.MatchString(joined) {
+		t.Fatalf("cleanup must set the guest clock to the host epoch (date @<epoch>); calls:\n%s", joined)
 	}
 }
 
