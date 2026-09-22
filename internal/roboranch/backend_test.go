@@ -470,6 +470,47 @@ func TestAndroidHealthDoesNotFailADeviceThatWillNotReportItsClock(t *testing.T) 
 	}
 }
 
+func TestRepairResyncsASkewedClockWithoutRestarting(t *testing.T) {
+	// A clock-skewed emulator is reachable and un-wedged, so repair must NOT bounce it — a
+	// restart reverts an AVD with a bad persisted clock straight back to its wrong time,
+	// which is how ci-pool-4 returned 155 days behind after each recreation. It should set
+	// the clock in place instead.
+	var restarted, clockSet bool
+	runner := runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "launchctl" {
+			restarted = true
+			return "", nil
+		}
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "pm path android"):
+			return "package:/system/framework/framework-res.apk\n", nil
+		case strings.Contains(joined, "get-state"):
+			return "device\n", nil
+		case strings.Contains(joined, "window"):
+			return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+		case strings.Contains(joined, "date -u"):
+			return fmt.Sprintf("%d\n", time.Now().Add(-200*24*time.Hour).Unix()), nil
+		case strings.Contains(joined, "shell date @"):
+			clockSet = true
+			return "", nil
+		}
+		return "", nil
+	})
+	host := HostManager{runner: runner}
+	adb := ADB{path: "adb", runner: runner}
+	device := DeviceConfig{ID: "ci-pool-4", Type: DeviceTypeEmulator, Serial: "emulator-5560", LaunchdLabel: "com.tracqi.emulator-pool-4"}
+	if err := host.repair(context.Background(), Config{}, adb, device); err != nil {
+		t.Fatalf("repair returned %v", err)
+	}
+	if restarted {
+		t.Fatal("a clock-skewed device was restarted; the bad persisted clock will just come back")
+	}
+	if !clockSet {
+		t.Fatal("repair did not resync the guest clock")
+	}
+}
+
 func TestRepairRestartsAWedgedDeviceEvenThoughAdbAnswers(t *testing.T) {
 	// repair shells out to launchctl, which the code refuses off-macOS before it
 	// ever reaches the fake runner. Pre-existing red on the ubuntu CI leg since

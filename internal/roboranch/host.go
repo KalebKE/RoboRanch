@@ -30,6 +30,14 @@ func (h HostManager) repair(ctx context.Context, cfg Config, adb ADB, device Dev
 	// printed "restarting", and this returned nil because adb could still reach it. Three
 	// emulators sat wedged for 22 days of uptime while repair reported repaired=3.
 	if adb.healthy(ctx, device) && !adb.wedged(ctx, device) {
+		// A clock-skewed device is reachable and un-wedged, so it reaches here as "fine" —
+		// but it fails every TLS chain until corrected. Resync in place rather than
+		// restarting: a restart reverts an AVD with a bad persisted clock straight back to
+		// its wrong time, which is how ci-pool-4 came back 155 days behind after each
+		// recreation and failed two CI attempts before the drift was even looked at.
+		if skew, ok := adb.clockSkew(ctx, device); ok && absDuration(skew) > maxClockSkew {
+			adb.resyncClock(ctx, device)
+		}
 		return nil
 	}
 	if err := h.restart(ctx, device); err != nil {

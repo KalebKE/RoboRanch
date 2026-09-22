@@ -76,6 +76,15 @@ func (a ADB) frameworkUp(ctx context.Context, device DeviceConfig) bool {
 	return err == nil && strings.Contains(out, "package:")
 }
 
+// resyncClock sets the guest clock to the host, best-effort. A restart would revert an AVD
+// whose persisted clock is wrong straight back to its bad time, so skew is repaired with
+// this rather than by bouncing the device — set the epoch explicitly because auto_time alone
+// did not recover ci-pool-4 when it was found 155 days behind.
+func (a ADB) resyncClock(ctx context.Context, device DeviceConfig) {
+	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "auto_time", "1")
+	_, _ = a.run(ctx, device.Serial, "shell", "date", fmt.Sprintf("@%d", time.Now().Unix()))
+}
+
 func (a ADB) clockSkew(ctx context.Context, device DeviceConfig) (time.Duration, bool) {
 	out, err := a.run(ctx, device.Serial, "shell", "date", "-u", "+%s")
 	if err != nil {
@@ -124,8 +133,7 @@ func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer)
 	// "Chain validation failed", while get-state and sys.boot_completed — the only health
 	// checks — both passed. auto_time alone did not recover it, so the epoch is set
 	// explicitly; both are best-effort because a physical device can refuse.
-	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "auto_time", "1")
-	_, _ = a.run(ctx, device.Serial, "shell", "date", fmt.Sprintf("@%d", time.Now().Unix()))
+	a.resyncClock(ctx, device)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
