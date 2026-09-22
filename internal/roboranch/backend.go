@@ -80,6 +80,11 @@ func (b androidBackend) health(ctx context.Context, device DeviceConfig) deviceH
 	if b.adb.wedged(ctx, device) {
 		return deviceHealth{reason: "an Application Not Responding dialog owns the screen"}
 	}
+	// Same class again: adb reachable, framework not serving. An install during a
+	// system_server restart fails with "system providers are not installed".
+	if !b.adb.frameworkUp(ctx, device) {
+		return deviceHealth{reason: "the package manager is not answering; system_server is down or restarting"}
+	}
 	// Same class of problem as wedged, different symptom: reachable, idle, and useless.
 	// A clock this far out fails every TLS chain on the device.
 	if skew, ok := b.adb.clockSkew(ctx, device); ok && absDuration(skew) > maxClockSkew {

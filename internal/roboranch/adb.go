@@ -65,6 +65,17 @@ func (a ADB) wedged(ctx context.Context, device DeviceConfig) bool {
 // whatever happens to sign in first, on branches that touch no auth code.
 //
 // Best-effort, like wedged: a device that will not answer is not condemned on that basis.
+// frameworkUp reports whether the package manager answers. `get-state` stays "device"
+// while system_server is dead or restarting — the watchdog killed ci-pool-3's framework on
+// 2026-09-22 and the next lease died installing its APK with "Cannot access system
+// provider: 'settings' before system providers are installed", charged to the caller.
+// `pm path android` is the narrowest probe that refuses exactly that window: it needs the
+// package service live and always resolves on a working device.
+func (a ADB) frameworkUp(ctx context.Context, device DeviceConfig) bool {
+	out, err := a.run(ctx, device.Serial, "shell", "pm", "path", "android")
+	return err == nil && strings.Contains(out, "package:")
+}
+
 func (a ADB) clockSkew(ctx context.Context, device DeviceConfig) (time.Duration, bool) {
 	out, err := a.run(ctx, device.Serial, "shell", "date", "-u", "+%s")
 	if err != nil {
