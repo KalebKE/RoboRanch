@@ -309,6 +309,36 @@ func deviceCtlFixtureRunner(t *testing.T, pairing, developerMode string, ddi, lo
 	})
 }
 
+// get-state answers "device" while system_server is dead or restarting. The watchdog
+// killed ci-pool-3's framework on 2026-09-22 and the next lease died installing its APK
+// with "Cannot access system provider: 'settings' before system providers are installed"
+// — a failure charged to the caller, on a device every existing check called healthy.
+// The package manager answering `pm path android` is the narrowest probe that refuses
+// exactly that window.
+func TestAndroidHealthRejectsADeviceWhoseFrameworkIsDown(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "get-state") {
+			return "device\n", nil
+		}
+		if strings.Contains(joined, "pm path android") {
+			return "", fmt.Errorf("cmd: Can't find service: package")
+		}
+		if strings.Contains(joined, "date -u") {
+			return fmt.Sprintf("%d\n", time.Now().Unix()), nil
+		}
+		return "", nil
+	})
+	backend := androidBackend{adb: ADB{path: "adb", runner: runner}}
+	got := backend.health(context.Background(), DeviceConfig{Serial: "emulator-5558"})
+	if got.healthy {
+		t.Fatal("a device whose package manager cannot answer must not be leased")
+	}
+	if !strings.Contains(got.reason, "package manager") {
+		t.Fatalf("reason should name the package manager, got: %q", got.reason)
+	}
+}
+
 func TestAndroidHealthRejectsAWedgedDevice(t *testing.T) {
 	// `adb get-state` answers "device" long after the UI is unusable: a system_server ANR
 	// leaves a dialog owning the screen and stalls broadcast delivery, but adb keeps
@@ -337,6 +367,10 @@ func TestAndroidHealthRejectsAWedgedDevice(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runner := runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+				joined := strings.Join(args, " ")
+				if strings.Contains(joined, "pm path android") {
+					return "package:/system/framework/framework-res.apk\n", nil
+				}
 				for _, a := range args {
 					if a == "get-state" {
 						return "device\n", nil
@@ -389,6 +423,8 @@ func TestAndroidHealthRejectsASkewedClock(t *testing.T) {
 			runner := runnerFunc(func(_ context.Context, _ string, args ...string) (string, error) {
 				joined := strings.Join(args, " ")
 				switch {
+				case strings.Contains(joined, "pm path android"):
+					return "package:/system/framework/framework-res.apk\n", nil
 				case strings.Contains(joined, "get-state"):
 					return "device\n", nil
 				case strings.Contains(joined, "window"):
@@ -421,6 +457,8 @@ func TestAndroidHealthDoesNotFailADeviceThatWillNotReportItsClock(t *testing.T) 
 			return "device\n", nil
 		case strings.Contains(joined, "window"):
 			return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+		case strings.Contains(joined, "pm path android"):
+			return "package:/system/framework/framework-res.apk\n", nil
 		case strings.Contains(joined, "date"):
 			return "", errors.New("date: not found")
 		}
@@ -429,6 +467,47 @@ func TestAndroidHealthDoesNotFailADeviceThatWillNotReportItsClock(t *testing.T) 
 	backend := androidBackend{adb: ADB{path: "adb", runner: runner}}
 	if got := backend.health(context.Background(), DeviceConfig{Serial: "emulator-5554"}); !got.healthy {
 		t.Fatalf("healthy = false, want true (reason %q)", got.reason)
+	}
+}
+
+func TestRepairResyncsASkewedClockWithoutRestarting(t *testing.T) {
+	// A clock-skewed emulator is reachable and un-wedged, so repair must NOT bounce it — a
+	// restart reverts an AVD with a bad persisted clock straight back to its wrong time,
+	// which is how ci-pool-4 returned 155 days behind after each recreation. It should set
+	// the clock in place instead.
+	var restarted, clockSet bool
+	runner := runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "launchctl" {
+			restarted = true
+			return "", nil
+		}
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "pm path android"):
+			return "package:/system/framework/framework-res.apk\n", nil
+		case strings.Contains(joined, "get-state"):
+			return "device\n", nil
+		case strings.Contains(joined, "window"):
+			return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+		case strings.Contains(joined, "date -u"):
+			return fmt.Sprintf("%d\n", time.Now().Add(-200*24*time.Hour).Unix()), nil
+		case strings.Contains(joined, "shell date @"):
+			clockSet = true
+			return "", nil
+		}
+		return "", nil
+	})
+	host := HostManager{runner: runner}
+	adb := ADB{path: "adb", runner: runner}
+	device := DeviceConfig{ID: "ci-pool-4", Type: DeviceTypeEmulator, Serial: "emulator-5560", LaunchdLabel: "com.tracqi.emulator-pool-4"}
+	if err := host.repair(context.Background(), Config{}, adb, device); err != nil {
+		t.Fatalf("repair returned %v", err)
+	}
+	if restarted {
+		t.Fatal("a clock-skewed device was restarted; the bad persisted clock will just come back")
+	}
+	if !clockSet {
+		t.Fatal("repair did not resync the guest clock")
 	}
 }
 

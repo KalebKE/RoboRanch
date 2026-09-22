@@ -65,6 +65,26 @@ func (a ADB) wedged(ctx context.Context, device DeviceConfig) bool {
 // whatever happens to sign in first, on branches that touch no auth code.
 //
 // Best-effort, like wedged: a device that will not answer is not condemned on that basis.
+// frameworkUp reports whether the package manager answers. `get-state` stays "device"
+// while system_server is dead or restarting — the watchdog killed ci-pool-3's framework on
+// 2026-09-22 and the next lease died installing its APK with "Cannot access system
+// provider: 'settings' before system providers are installed", charged to the caller.
+// `pm path android` is the narrowest probe that refuses exactly that window: it needs the
+// package service live and always resolves on a working device.
+func (a ADB) frameworkUp(ctx context.Context, device DeviceConfig) bool {
+	out, err := a.run(ctx, device.Serial, "shell", "pm", "path", "android")
+	return err == nil && strings.Contains(out, "package:")
+}
+
+// resyncClock sets the guest clock to the host, best-effort. A restart would revert an AVD
+// whose persisted clock is wrong straight back to its bad time, so skew is repaired with
+// this rather than by bouncing the device — set the epoch explicitly because auto_time alone
+// did not recover ci-pool-4 when it was found 155 days behind.
+func (a ADB) resyncClock(ctx context.Context, device DeviceConfig) {
+	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "auto_time", "1")
+	_, _ = a.run(ctx, device.Serial, "shell", "date", fmt.Sprintf("@%d", time.Now().Unix()))
+}
+
 func (a ADB) clockSkew(ctx context.Context, device DeviceConfig) (time.Duration, bool) {
 	out, err := a.run(ctx, device.Serial, "shell", "date", "-u", "+%s")
 	if err != nil {
@@ -107,6 +127,13 @@ func (a ADB) cleanup(ctx context.Context, device DeviceConfig, stderr io.Writer)
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "window_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "transition_animation_scale", "0.0")
 	_, _ = a.run(ctx, device.Serial, "shell", "settings", "put", "global", "animator_duration_scale", "0.0")
+	// Resync the guest clock to the host on every cleanup. A drifted clock fails TLS chain
+	// validation against any certificate issued after the guest's idea of now: ci-pool-4 sat
+	// 155 days in the past on 2026-09-21 and every Firebase call on the lease died with
+	// "Chain validation failed", while get-state and sys.boot_completed — the only health
+	// checks — both passed. auto_time alone did not recover it, so the epoch is set
+	// explicitly; both are best-effort because a physical device can refuse.
+	a.resyncClock(ctx, device)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
