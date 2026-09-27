@@ -196,6 +196,64 @@ func TestIOSBootCapacitySerializesLeasesAndShutdownFreesSlot(t *testing.T) {
 	}
 }
 
+// A pool whose devices are booted and idle must not refuse to lease them.
+//
+// `cleanup: shutdown` is mandatory once maxBooted is set (config.go:144), so an
+// unleased pooled simulator is normally powered off and the ceiling counts
+// leases. Anything that leaves one booted without a lease — `repair --all`, a
+// killed run, an interrupted release — therefore spends capacity nobody holds.
+// Four idle booted devices against a max of four wedged this pool completely:
+// the gate is `>=`, every checkout was refused, and since nothing was leased,
+// nothing would ever release to free a slot.
+//
+// Leasing a simulator that is already booted boots nothing, so it cannot
+// breach the ceiling. Refusing it is the bug.
+func TestIOSBootCapacityLeasesASimulatorThatIsAlreadyBooted(t *testing.T) {
+	runner := newSimulatorRunner(map[string]string{"SIM-1": "Booted", "SIM-2": "Shutdown"})
+	app, rt := capacityTestApp(t, runner)
+	options := checkoutOptions{
+		platform: PlatformIOS, deviceType: DeviceTypeSimulator, ttl: time.Minute, holderPID: os.Getpid(),
+	}
+
+	result, code, err := app.checkout(context.Background(), rt, options)
+	if err != nil || code != exitOK {
+		t.Fatalf("checkout refused a simulator that was already booted: code=%d err=%v", code, err)
+	}
+	if result.ID != "sim-1" {
+		t.Fatalf("expected the already-booted sim-1, got %s", result.ID)
+	}
+	if runner.bootedCount() != 1 {
+		t.Fatalf("checkout changed the booted count: %d", runner.bootedCount())
+	}
+	if runner.called("simctl bootstatus") {
+		t.Fatalf("checkout booted a simulator while at capacity: %v", runner.callList())
+	}
+}
+
+// The pool drains back under the ceiling on its own once it can lease again:
+// release shuts the device down, because that is the cleanup mode the ceiling
+// requires. Without the fix above this never runs, since the lease that would
+// release is the one being refused.
+func TestIOSBootCapacityDrainsBackUnderTheCeilingOnRelease(t *testing.T) {
+	runner := newSimulatorRunner(map[string]string{"SIM-1": "Booted", "SIM-2": "Booted"})
+	app, rt := capacityTestApp(t, runner)
+	options := checkoutOptions{
+		platform: PlatformIOS, deviceType: DeviceTypeSimulator, ttl: time.Minute, holderPID: os.Getpid(),
+	}
+
+	result, code, err := app.checkout(context.Background(), rt, options)
+	if err != nil || code != exitOK {
+		t.Fatalf("checkout refused an over-capacity pool of idle booted devices: code=%d err=%v", code, err)
+	}
+	device, _ := findDevice(rt.config.Devices, result.ID)
+	if err := app.releaseDevice(context.Background(), rt, device, result.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if runner.bootedCount() != 1 {
+		t.Fatalf("release did not drain the pool back toward the ceiling: %d booted", runner.bootedCount())
+	}
+}
+
 func TestIOSBootCapacityCountsManualSimulatorWithoutStoppingIt(t *testing.T) {
 	runner := newSimulatorRunner(map[string]string{
 		"SIM-1": "Shutdown", "SIM-2": "Shutdown", "MANUAL": "Booted",
