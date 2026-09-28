@@ -934,10 +934,39 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 				return CheckoutResult{}, exitUnhealthy, err
 			}
 			if len(booted) >= maxBooted {
-				capacityBlocked = true
-				candidates = withoutIOSSimulators(candidates)
-				fmt.Fprintf(a.stderr, "roboranch: iOS simulator capacity reached: %d booted / %d max (%s)\n",
-					len(booted), maxBooted, formatSimulators(booted))
+				// At the ceiling, a simulator that is ALREADY booted is still
+				// leasable: handing it over boots nothing, so it cannot push
+				// the count higher. Only candidates that would need a boot are
+				// dropped.
+				//
+				// Dropping all of them used to wedge the pool beyond recovery.
+				// `cleanup: shutdown` is mandatory once maxBooted is set
+				// (config.go:144), so an unleased pooled simulator is normally
+				// powered off — but anything that leaves one booted without a
+				// lease (`repair --all`, a killed run, an interrupted release)
+				// spends capacity nobody holds. With the ceiling at four, four
+				// idle booted devices refused every checkout, and since none
+				// was leased, none would ever release to free a slot.
+				//
+				// Reusing them instead lets the pool drain itself: each lease
+				// shuts its device down on release, so the count falls back
+				// under the ceiling without anyone intervening.
+				// Booted AND unleased. A booted device someone holds is not
+				// spare capacity, it is capacity in use — treating it as
+				// reusable would turn an honestly-contended pool's "capacity
+				// reached" into "no healthy device", which says the opposite
+				// of what happened.
+				reusable := onlyBootedIOSSimulators(candidates, booted)
+				if hasUnleasedIOSSimulator(rt, reusable) {
+					candidates = reusable
+					fmt.Fprintf(a.stderr, "roboranch: at capacity (%d booted / %d max); reusing an already-booted idle device\n",
+						len(booted), maxBooted)
+				} else {
+					capacityBlocked = true
+					candidates = withoutIOSSimulators(candidates)
+					fmt.Fprintf(a.stderr, "roboranch: iOS simulator capacity reached: %d booted / %d max (%s)\n",
+						len(booted), maxBooted, formatSimulators(booted))
+				}
 			}
 		}
 	}
@@ -1047,6 +1076,45 @@ func hasIOSSimulator(devices []DeviceConfig) bool {
 		}
 	}
 	return false
+}
+
+// hasUnleasedIOSSimulator reports whether any iOS simulator among devices is
+// free to take right now. The authoritative claim still happens in the
+// checkout loop; this only decides whether reuse is worth attempting.
+func hasUnleasedIOSSimulator(rt *runtimeState, devices []DeviceConfig) bool {
+	for _, device := range devices {
+		if device.Platform != PlatformIOS || device.Type != DeviceTypeSimulator {
+			continue
+		}
+		if !rt.store.locked(device.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyBootedIOSSimulators keeps every non-simulator candidate and those iOS
+// simulators that are already booted, preserving the caller's ordering.
+//
+// A simulator this pool does not manage never appears in `devices`, so it is
+// never selected here — it occupies capacity and is left strictly alone, which
+// is the policy TestIOSBootCapacityCountsManualSimulatorWithoutStoppingIt pins.
+func onlyBootedIOSSimulators(devices []DeviceConfig, booted []simctlDevice) []DeviceConfig {
+	bootedSerials := make(map[string]struct{}, len(booted))
+	for _, simulator := range booted {
+		bootedSerials[simulator.UDID] = struct{}{}
+	}
+	filtered := make([]DeviceConfig, 0, len(devices))
+	for _, device := range devices {
+		if device.Platform != PlatformIOS || device.Type != DeviceTypeSimulator {
+			filtered = append(filtered, device)
+			continue
+		}
+		if _, ok := bootedSerials[device.Serial]; ok {
+			filtered = append(filtered, device)
+		}
+	}
+	return filtered
 }
 
 func withoutIOSSimulators(devices []DeviceConfig) []DeviceConfig {
