@@ -37,7 +37,7 @@ func leaseTestPool(t *testing.T) (string, string) {
 	if err := os.MkdirAll(filepath.Dir(adb), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ncase \"$*\" in\n*get-state) echo device ;;\n*dumpsys*) echo mCurrentFocus=Test ;;\n*date*) date -u +%s ;;\n*) exit 1 ;;\nesac\n"
+	script := "#!/bin/sh\ncase \"$*\" in\n*get-state) echo device ;;\n*dumpsys*) echo mCurrentFocus=Test ;;\n*date*) date -u +%s ;;\n*\"pm path android\"*) echo package:/system/framework/framework-res.apk ;;\n*) exit 1 ;;\nesac\n"
 	if err := os.WriteFile(adb, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

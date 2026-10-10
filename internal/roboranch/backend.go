@@ -101,6 +101,29 @@ func (b androidBackend) repair(ctx context.Context, cfg Config, device DeviceCon
 }
 
 func (b androidBackend) cleanup(ctx context.Context, cfg Config, device DeviceConfig, stderr io.Writer) error {
+	err := b.cleanupOnce(ctx, cfg, device, stderr)
+	if err == nil || !b.repairable(device) || ctx.Err() != nil {
+		return err
+	}
+	// A failed cleanup retains the lease — at release, and again at every GC after the TTL,
+	// because GC runs this same cleanup. repair skips leased devices, so an emulator that
+	// broke under its lease was never restarted and left the pool for good. On 2026-10-10
+	// ci-pool-3 (package manager dead: "Can't find service: package") and ci-pool-6 (ANR
+	// dialog; cleanup hit its deadline) were both stranded that way. Repair it the way
+	// checkout would — repair restarts only a device that health would fail — then retry.
+	fmt.Fprintf(stderr, "roboranch: cleanup: %s failed (%v); repairing and retrying\n", device.ID, err)
+	repairCtx, cancel := context.WithTimeout(ctx, cfg.repairTimeoutDuration()+deviceBootTimeout(cfg, device))
+	defer cancel()
+	if repairErr := b.repair(repairCtx, cfg, device); repairErr != nil {
+		return fmt.Errorf("%w; repair failed: %v", err, repairErr)
+	}
+	if retryErr := b.cleanupOnce(ctx, cfg, device, stderr); retryErr != nil {
+		return fmt.Errorf("after repair: %w (first attempt: %v)", retryErr, err)
+	}
+	return nil
+}
+
+func (b androidBackend) cleanupOnce(ctx context.Context, cfg Config, device DeviceConfig, stderr io.Writer) error {
 	cleanupCtx, cancel := context.WithTimeout(ctx, cfg.repairTimeoutDuration())
 	defer cancel()
 	return b.adb.cleanup(cleanupCtx, device, stderr)

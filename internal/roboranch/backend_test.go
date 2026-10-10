@@ -553,3 +553,47 @@ func TestRepairRestartsAWedgedDeviceEvenThoughAdbAnswers(t *testing.T) {
 		t.Fatal("a wedged emulator was not restarted")
 	}
 }
+
+func TestRepairRestartsADeviceWhoseFrameworkIsDown(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd repair is macOS-only")
+	}
+	// health fails a device whose package manager does not answer, but repair still guarded
+	// on reachable-and-unwedged, so it called such a device fine and returned without
+	// restarting it -- the same disagreement the wedge check once had. On 2026-10-10 three
+	// pool emulators answered adb with no package service, and every CI install on them
+	// failed with "cmd: Can't find service: package".
+	var restarted bool
+	runner := runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "launchctl" {
+			restarted = true
+			return "", nil
+		}
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "get-state"):
+			return "device\n", nil
+		case strings.Contains(joined, "window"):
+			return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+		case strings.Contains(joined, "sys.boot_completed"):
+			return "1\n", nil
+		case strings.Contains(joined, "date"):
+			return fmt.Sprintf("%d\n", time.Now().UTC().Unix()), nil
+		case strings.Contains(joined, "pm path android") && !restarted:
+			return "", errors.New("adb -s emulator-5556 shell pm path android: exit status 20: cmd: Can't find service: package")
+		case strings.Contains(joined, "pm path android"):
+			return "package:/system/framework/framework-res.apk\n", nil
+		}
+		return "", nil
+	})
+	host := HostManager{runner: runner}
+	adb := ADB{path: "adb", runner: runner}
+	device := DeviceConfig{ID: "ci-pool-2", Type: DeviceTypeEmulator, Serial: "emulator-5556", LaunchdLabel: "com.tracqi.emulator-pool-2"}
+
+	if err := host.repair(context.Background(), Config{}, adb, device); err != nil {
+		t.Fatalf("repair returned %v", err)
+	}
+	if !restarted {
+		t.Fatal("an emulator whose framework is down was not restarted")
+	}
+}
