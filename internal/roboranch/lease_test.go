@@ -631,6 +631,14 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) (string
 			}
 			return "", errors.New("not booted")
 		}
+		// A working device's package manager answers. Without this every fake device failed
+		// health, and checkout only leased them because repair called them fine anyway.
+		if strings.Join(adbArgs, " ") == "shell pm path android" {
+			if f.states[serial] == "device" {
+				return "package:/system/framework/framework-res.apk\n", nil
+			}
+			return "", errors.New("cmd: Can't find service: package")
+		}
 		return "", nil
 	}
 	return "", nil

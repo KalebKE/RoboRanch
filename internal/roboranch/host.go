@@ -29,7 +29,9 @@ func (h HostManager) repair(ctx context.Context, cfg Config, adb ADB, device Dev
 	// health assessment that sent work here: the CLI decided a wedged device was unhealthy,
 	// printed "restarting", and this returned nil because adb could still reach it. Three
 	// emulators sat wedged for 22 days of uptime while repair reported repaired=3.
-	if adb.healthy(ctx, device) && !adb.wedged(ctx, device) {
+	// frameworkUp too: health fails a device whose package manager does not answer, and a
+	// restart is the only thing that brings a dead system_server back.
+	if adb.healthy(ctx, device) && !adb.wedged(ctx, device) && adb.frameworkUp(ctx, device) {
 		// A clock-skewed device is reachable and un-wedged, so it reaches here as "fine" —
 		// but it fails every TLS chain until corrected. Resync in place rather than
 		// restarting: a restart reverts an AVD with a bad persisted clock straight back to
