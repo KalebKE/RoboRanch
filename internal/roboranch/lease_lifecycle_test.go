@@ -3,8 +3,10 @@ package roboranch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -209,5 +211,122 @@ func TestGCDoesNotInterruptDevicePreparation(t *testing.T) {
 	}
 	if runner.state("SIM-1") != "Booted" {
 		t.Fatal("preparing simulator was shut down")
+	}
+}
+
+type emulatorFault int
+
+const (
+	// The package manager is dead: ci-pool-3 on 2026-10-10.
+	faultDeadFramework emulatorFault = iota
+	// An ANR dialog owns the screen and pm hangs until cleanup's deadline: ci-pool-6.
+	faultANRHang
+)
+
+// brokenEmulator answers adb like a pool emulator that broke under its lease, until launchd
+// restarts it.
+func brokenEmulator(t *testing.T, fault emulatorFault) (runnerFunc, *bool, *[]string) {
+	t.Helper()
+	restarted := false
+	var uninstalled []string
+	runner := runnerFunc(func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "launchctl" {
+			restarted = true
+			return "", nil
+		}
+		call := strings.Join(args, " ")
+		switch {
+		case strings.Contains(call, "get-state"):
+			return "device\n", nil
+		case strings.Contains(call, "window") && fault == faultANRHang && !restarted:
+			return "  mCurrentFocus=Window{9d1c0e2 u0 Application Not Responding: com.tracqi.obd2}\n", nil
+		case strings.Contains(call, "window"):
+			return "  mCurrentFocus=Window{2c55bb1 u0 launcher}\n", nil
+		case strings.Contains(call, "sys.boot_completed"):
+			return "1\n", nil
+		case strings.Contains(call, "date"):
+			return fmt.Sprintf("%d\n", time.Now().UTC().Unix()), nil
+		case strings.Contains(call, "pm ") && fault == faultDeadFramework && !restarted:
+			return "", errors.New("exit status 20: cmd: Can't find service: package")
+		case strings.Contains(call, "pm list packages -3") && fault == faultANRHang && !restarted:
+			<-ctx.Done()
+			return "", ctx.Err()
+		case strings.Contains(call, "pm path android"):
+			return "package:/system/framework/framework-res.apk\n", nil
+		case strings.Contains(call, "pm list packages -3"):
+			return "package:com.tracqi.obd2.test\n", nil
+		case len(args) >= 3 && args[2] == "uninstall":
+			uninstalled = append(uninstalled, args[len(args)-1])
+			return "Success\n", nil
+		}
+		return "", nil
+	})
+	return runner, &restarted, &uninstalled
+}
+
+func TestReleaseRepairsAnEmulatorThatBrokeUnderTheLease(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd repair is macOS-only")
+	}
+	for _, tc := range []struct {
+		name  string
+		fault emulatorFault
+	}{
+		{"package manager dead", faultDeadFramework},
+		{"ANR dialog, cleanup times out", faultANRHang},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := newLeaseStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			device := DeviceConfig{ID: "ci-pool-3", Serial: "emulator-5558", Type: DeviceTypeEmulator, LaunchdLabel: "com.tracqi.emulator-pool-3"}
+			lease, _, err := store.acquire(device, 0, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner, restarted, uninstalled := brokenEmulator(t, tc.fault)
+			cfg := Config{Devices: []DeviceConfig{device}, RepairTimeout: "200ms"}
+			app := &App{stdout: ioDiscard{}, stderr: ioDiscard{}}
+			rt := &runtimeState{config: cfg, store: store, backends: newBackendRegistry(cfg, runner)}
+
+			if err := app.releaseDevice(context.Background(), rt, device, lease.LeaseID); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			if !*restarted {
+				t.Fatal("the emulator was not restarted")
+			}
+			if strings.Join(*uninstalled, ",") != "com.tracqi.obd2.test" {
+				t.Fatalf("cleanup did not run after the restart: uninstalled %v", *uninstalled)
+			}
+			if store.locked(device.ID) {
+				t.Fatal("the lease was retained")
+			}
+		})
+	}
+}
+
+func TestGCRepairsAnExpiredEmulatorThatBrokeUnderTheLease(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd repair is macOS-only")
+	}
+	store, err := newLeaseStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := DeviceConfig{ID: "ci-pool-6", Serial: "emulator-5566", Type: DeviceTypeEmulator, LaunchdLabel: "com.tracqi.emulator-pool-6"}
+	if _, _, err := store.acquire(device, 0, -time.Second); err != nil {
+		t.Fatal(err)
+	}
+	runner, restarted, _ := brokenEmulator(t, faultANRHang)
+	cfg := Config{Devices: []DeviceConfig{device}, RepairTimeout: "200ms"}
+	app := &App{stdout: ioDiscard{}, stderr: ioDiscard{}}
+	rt := &runtimeState{config: cfg, store: store, backends: newBackendRegistry(cfg, runner)}
+
+	if reaped, retained := app.gc(context.Background(), rt, nil); reaped != 1 || retained != 0 {
+		t.Fatalf("gc reaped=%d retained=%d", reaped, retained)
+	}
+	if !*restarted || store.locked(device.ID) {
+		t.Fatalf("restarted=%v locked=%v", *restarted, store.locked(device.ID))
 	}
 }
