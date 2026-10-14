@@ -150,6 +150,39 @@ func TestCheckoutRotatesTowardLeastRecentlyUsedDevice(t *testing.T) {
 	}
 }
 
+func TestCheckoutOfFullyLeasedPoolIsUnavailableNotUnhealthy(t *testing.T) {
+	store, err := newLeaseStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{states: map[string]string{
+		"emulator-5554": "device",
+		"emulator-5556": "device",
+	}}
+	app := &App{runner: runner, stdout: ioDiscard{}, stderr: ioDiscard{}}
+	rt := &runtimeState{
+		config: Config{
+			Version:  1,
+			StateDir: t.TempDir(),
+			Devices: []DeviceConfig{
+				{ID: "emu-1", Type: DeviceTypeEmulator, Serial: "emulator-5554"},
+				{ID: "emu-2", Type: DeviceTypeEmulator, Serial: "emulator-5556"},
+			},
+		},
+		store:    store,
+		backends: newBackendRegistry(Config{}, runner),
+	}
+	options := checkoutOptions{deviceType: DeviceTypeAny, ttl: time.Minute, holderPID: os.Getpid()}
+	for i := 0; i < 2; i++ {
+		if _, code, err := app.checkout(context.Background(), rt, options); err != nil || code != exitOK {
+			t.Fatalf("checkout %d failed: code=%d err=%v", i+1, code, err)
+		}
+	}
+	if _, code, err := app.checkout(context.Background(), rt, options); err == nil || code != exitUnavailable {
+		t.Fatalf("checkout of a fully leased pool should be unavailable: code=%d err=%v", code, err)
+	}
+}
+
 func TestIOSBootCapacitySerializesLeasesAndShutdownFreesSlot(t *testing.T) {
 	runner := newSimulatorRunner(map[string]string{"SIM-1": "Shutdown", "SIM-2": "Shutdown"})
 	app, rt := capacityTestApp(t, runner)

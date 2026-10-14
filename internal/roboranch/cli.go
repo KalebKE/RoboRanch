@@ -1049,11 +1049,15 @@ func (a *App) tryCheckout(ctx context.Context, rt *runtimeState, options checkou
 		}
 
 	}
+	// Locked wins over unhealthy: a locked device is skipped before its health
+	// is ever measured, so a fully leased pool never sets hadHealthy. Reporting
+	// that as "unhealthy" would tell callers the pool is broken when it is only
+	// busy, and the held devices will come back on release.
+	if hadLocked {
+		return CheckoutResult{}, exitUnavailable, fmt.Errorf("no device available; all matching devices are locked or unhealthy")
+	}
 	if !hadHealthy {
 		return CheckoutResult{}, exitUnhealthy, fmt.Errorf("no healthy device available")
-	}
-	if hadLocked {
-		return CheckoutResult{}, exitUnavailable, fmt.Errorf("no device available; all matching healthy devices are locked")
 	}
 	return CheckoutResult{}, exitUnavailable, fmt.Errorf("no device available")
 }
